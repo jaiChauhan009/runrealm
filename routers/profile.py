@@ -13,12 +13,10 @@ def _build_profile(profile: dict) -> dict:
     total_xp = profile.get("xp_points", 0) or 0
     return {
         "id": profile.get("id"),
-        "user": {
-            "id": profile.get("user_id"),
-            "username": profile.get("username"),
-            "level": xp.level_from_xp(total_xp),
-            "xpPoints": total_xp,
-        },
+        "userId": profile.get("user_id"),
+        "username": profile.get("username"),
+        "level": xp.level_from_xp(total_xp),
+        "xpPoints": total_xp,
         "displayName": profile.get("display_name"),
         "avatarUrl": profile.get("avatar_url"),
         "bio": profile.get("bio"),
