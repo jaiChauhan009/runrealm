@@ -37,7 +37,7 @@ def nearby_territories(
     delta = radiusKm * deg_per_km
     res = (
         db.table("territories")
-        .select("*, captured_user:user_profiles!territories_captured_by_fkey(id,username), team:teams(id,name,territory_color_hex)")
+        .select("*")
         .gte("center_lat", lat - delta)
         .lte("center_lat", lat + delta)
         .gte("center_lon", lon - delta)

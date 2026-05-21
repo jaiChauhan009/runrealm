@@ -33,7 +33,7 @@ def activity_feed(
     start = page * size
     res = (
         db.table("activity_feed")
-        .select("*, user:user_profiles!activity_feed_user_id_fkey(id,username,avatar_url)", count="exact")
+        .select("*", count="exact")
         .in_("user_id", list(friend_ids))
         .eq("is_public", True)
         .order("created_at", desc=True)
