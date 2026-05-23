@@ -29,6 +29,12 @@ def _build_profile(profile: dict) -> dict:
         "territoriesCaptured": profile.get("territories_captured", 0),
         "isPublic": profile.get("is_public", True),
         "updatedAt": profile.get("updated_at"),
+        "socialLinks": {
+            "instagram": profile.get("instagram_handle"),
+            "twitter": profile.get("twitter_handle"),
+            "strava": profile.get("strava_url"),
+            "linkedin": profile.get("linkedin_url"),
+        },
     }
 
 
@@ -70,6 +76,14 @@ def update_profile(
         update["avatar_url"] = body.avatarUrl
     if body.isPublic is not None:
         update["is_public"] = body.isPublic
+    if body.instagramHandle is not None:
+        update["instagram_handle"] = body.instagramHandle
+    if body.twitterHandle is not None:
+        update["twitter_handle"] = body.twitterHandle
+    if body.stravaUrl is not None:
+        update["strava_url"] = body.stravaUrl
+    if body.linkedinUrl is not None:
+        update["linkedin_url"] = body.linkedinUrl
 
     if not update:
         res = db.table("user_profiles").select("*").eq("user_id", uid).single().execute()

@@ -11,6 +11,7 @@ from postgrest.exceptions import APIError as PostgRESTError
 from database import test_connection
 from routers import (
     auth,
+    content,
     dashboard,
     habits,
     leaderboard,
@@ -21,6 +22,7 @@ from routers import (
     social,
     sync,
     territories,
+    todos,
 )
 
 
@@ -112,6 +114,8 @@ app.include_router(leaderboard.router,   prefix="/api/v1/leaderboard",   tags=["
 app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["Notifications"])
 app.include_router(profile.router,       prefix="/api/v1/profile",       tags=["Profile"])
 app.include_router(map.router,           prefix="/api/v1/map",           tags=["Map"])
+app.include_router(todos.router,         prefix="/api/v1/todos",         tags=["Todos"])
+app.include_router(content.router,       prefix="/api/v1/content",       tags=["Content"])
 
 
 @app.get("/health", tags=["Health"])

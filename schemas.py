@@ -106,3 +106,22 @@ class ProfileUpdateRequest(BaseModel):
     city: Optional[str] = None
     avatarUrl: Optional[str] = None
     isPublic: Optional[bool] = None
+    instagramHandle: Optional[str] = None
+    twitterHandle: Optional[str] = None
+    stravaUrl: Optional[str] = None
+    linkedinUrl: Optional[str] = None
+
+
+# ── todos ─────────────────────────────────────────────────────────────────────
+
+class TodoCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = None
+    todoDate: Optional[date] = None
+    category: Optional[str] = "GENERAL"
+
+
+class TodoUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    category: Optional[str] = None
