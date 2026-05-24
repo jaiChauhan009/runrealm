@@ -42,3 +42,9 @@ CREATE INDEX IF NOT EXISTS idx_league_members_user     ON league_members(user_id
 CREATE INDEX IF NOT EXISTS idx_league_members_league   ON league_members(league_id);
 CREATE INDEX IF NOT EXISTS idx_join_requests_league    ON league_join_requests(league_id, status);
 CREATE INDEX IF NOT EXISTS idx_delete_votes_league     ON league_delete_votes(league_id);
+
+-- Disable RLS — consistent with all other tables in this project (app layer handles isolation)
+ALTER TABLE leagues              DISABLE ROW LEVEL SECURITY;
+ALTER TABLE league_members       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE league_join_requests DISABLE ROW LEVEL SECURITY;
+ALTER TABLE league_delete_votes  DISABLE ROW LEVEL SECURITY;
