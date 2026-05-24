@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import ceil
 from typing import Optional
 
@@ -84,7 +84,29 @@ def _league_summary(league: dict, member_count: int, my_role: Optional[str]) -> 
         "createdAt": league.get("created_at"),
         "memberCount": member_count,
         "myRole": my_role,
+        "deleteVoteDeadline": league.get("vote_deadline"),
     }
+
+
+def _parse_dt(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def _notify_members(member_ids: list, title: str, body: str, db: Client):
+    if not member_ids:
+        return
+    db.table("notifications").insert([
+        {
+            "user_id": uid,
+            "title": title,
+            "body": body,
+            "notification_type": "LEAGUE_UPDATE",
+            "is_read": False,
+        }
+        for uid in member_ids
+    ]).execute()
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -168,6 +190,26 @@ def get_league(
     uid = user.id
     league = _get_league_or_404(league_id, db)
 
+    # ── Deadline check ────────────────────────────────────────────────────────
+    deadline = _parse_dt(league.get("vote_deadline"))
+    if deadline and datetime.now(timezone.utc) > deadline:
+        members_res = db.table("league_members").select("user_id").eq("league_id", league_id).execute()
+        member_ids = [m["user_id"] for m in (members_res.data or [])]
+        member_count_now = len(member_ids)
+        votes_res = db.table("league_delete_votes").select("user_id").eq("league_id", league_id).execute()
+        vote_count = len(votes_res.data or [])
+        needed = ceil(member_count_now / 2) if member_count_now else 1
+
+        if vote_count >= needed:
+            db.table("leagues").delete().eq("id", league_id).execute()
+            _notify_members(member_ids, "League Dissolved", f"'{league['name']}' was deleted by majority vote", db)
+            raise HTTPException(404, "League was dissolved by majority vote")
+        else:
+            db.table("leagues").update({"vote_deadline": None}).eq("id", league_id).execute()
+            _notify_members(member_ids, "Vote Failed", f"Vote to delete '{league['name']}' failed — league continues", db)
+            league["vote_deadline"] = None  # reflect reset in this response
+
+    # ── Members ───────────────────────────────────────────────────────────────
     members_res = (
         db.table("league_members")
         .select("*")
@@ -179,7 +221,7 @@ def get_league(
     member_count = len(members)
     my_role = next((m["role"] for m in members if m["userId"] == uid), None)
 
-    # Pending join requests — visible to admins only
+    # ── Pending join requests — visible to admins only ────────────────────────
     pending_requests = []
     if my_role in ("CREATOR", "LEADER"):
         req_res = (
@@ -210,7 +252,7 @@ def get_league(
                     "level": p.get("level", 1),
                 })
 
-    # Delete votes
+    # ── Delete votes ──────────────────────────────────────────────────────────
     votes_res = (
         db.table("league_delete_votes")
         .select("user_id")
@@ -389,19 +431,41 @@ def vote_delete(
     if not _get_my_role(league_id, uid, db):
         raise HTTPException(403, "Not a member")
 
+    league = _get_league_or_404(league_id, db)
+    now = datetime.now(timezone.utc)
+
+    # Set deadline on first vote; reject if existing window has already closed
+    deadline = _parse_dt(league.get("vote_deadline"))
+    if deadline is None:
+        deadline = now + timedelta(minutes=30)
+        db.table("leagues").update({"vote_deadline": deadline.isoformat()}).eq("id", league_id).execute()
+    elif now > deadline:
+        raise HTTPException(400, "Vote window has closed — fetch the league to resolve")
+
+    # Record vote (idempotent)
     db.table("league_delete_votes").upsert({
         "league_id": league_id,
         "user_id": uid,
-        "voted_at": datetime.now(timezone.utc).isoformat(),
+        "voted_at": now.isoformat(),
     }).execute()
 
     votes_res = db.table("league_delete_votes").select("user_id").eq("league_id", league_id).execute()
     vote_count = len(votes_res.data or [])
-    member_count = _member_count(league_id, db)
+
+    members_res = db.table("league_members").select("user_id").eq("league_id", league_id).execute()
+    member_ids = [m["user_id"] for m in (members_res.data or [])]
+    member_count = len(member_ids)
     needed = ceil(member_count / 2) if member_count else 1
 
     if vote_count >= needed:
         db.table("leagues").delete().eq("id", league_id).execute()
-        return ok({"deleted": True, "votes": vote_count, "needed": needed}, "League deleted by vote")
+        _notify_members(member_ids, "League Dissolved", f"'{league['name']}' was deleted by majority vote", db)
+        return ok(
+            {"deleted": True, "votes": vote_count, "needed": needed, "deadline": deadline.isoformat()},
+            "League deleted by vote",
+        )
 
-    return ok({"deleted": False, "votes": vote_count, "needed": needed}, f"Vote recorded ({vote_count}/{needed})")
+    return ok(
+        {"deleted": False, "votes": vote_count, "needed": needed, "deadline": deadline.isoformat()},
+        f"Vote recorded ({vote_count}/{needed})",
+    )

@@ -43,6 +43,9 @@ CREATE INDEX IF NOT EXISTS idx_league_members_league   ON league_members(league_
 CREATE INDEX IF NOT EXISTS idx_join_requests_league    ON league_join_requests(league_id, status);
 CREATE INDEX IF NOT EXISTS idx_delete_votes_league     ON league_delete_votes(league_id);
 
+-- Vote deadline for the 30-minute delete-vote window
+ALTER TABLE leagues ADD COLUMN IF NOT EXISTS vote_deadline TIMESTAMPTZ;
+
 -- Disable RLS — consistent with all other tables in this project (app layer handles isolation)
 ALTER TABLE leagues              DISABLE ROW LEVEL SECURITY;
 ALTER TABLE league_members       DISABLE ROW LEVEL SECURITY;
