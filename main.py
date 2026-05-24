@@ -14,6 +14,7 @@ from routers import (
     content,
     dashboard,
     habits,
+    leagues,
     leaderboard,
     map,
     notifications,
@@ -110,6 +111,7 @@ app.include_router(territories.router,   prefix="/api/v1/territories",   tags=["
 app.include_router(habits.router,        prefix="/api/v1/habits",        tags=["Habits"])
 app.include_router(sync.router,          prefix="/api/v1/sync",          tags=["Sync"])
 app.include_router(social.router,        prefix="/api/v1/social",        tags=["Social"])
+app.include_router(leagues.router,       prefix="/api/v1/leagues",       tags=["Leagues"])
 app.include_router(leaderboard.router,   prefix="/api/v1/leaderboard",   tags=["Leaderboard"])
 app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["Notifications"])
 app.include_router(profile.router,       prefix="/api/v1/profile",       tags=["Profile"])

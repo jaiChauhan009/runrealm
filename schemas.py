@@ -134,3 +134,18 @@ class TodoStatusRequest(BaseModel):
 
 class NotificationTodoActionRequest(BaseModel):
     status: Literal["DONE", "CANCELLED", "DEFERRED"]
+
+
+# ── leagues ───────────────────────────────────────────────────────────────────
+
+class SocialLinkItem(BaseModel):
+    platform: str
+    url: str
+    label: Optional[str] = None
+
+
+class LeagueCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: Optional[str] = None
+    scope: Literal["GLOBAL", "COUNTRY", "STATE", "LOCAL"] = "GLOBAL"
+    socialLinks: Optional[List[SocialLinkItem]] = None

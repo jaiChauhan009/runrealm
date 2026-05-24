@@ -905,6 +905,58 @@ Color logic:
 
 ---
 
+#### `GET /map/territories/polygons`
+
+**Query params:** `?lat=X&lon=Y&radiusKm=5`
+
+Returns nearby territories as a GeoJSON FeatureCollection with **two features per territory**:
+
+| Feature type | Geometry | Purpose |
+|---|---|---|
+| `territory_polygon` | Polygon (from `boundary_geo_json`) | FillLayer — the captured area |
+| `territory_label` | Point (center) | CircleLayer — owner-initial badge |
+
+Both features share the same `territoryId` so the client can pair them. Territories without `boundary_geo_json` are returned as Point-only.
+
+**Shared feature properties:**
+```json
+{
+  "type": "territory_polygon" | "territory_label",
+  "territoryId": "uuid",
+  "name": "Connaught Place",
+  "areaSqKm": 1.2,
+  "pointValue": 100,
+  "captureCount": 7,
+  "capturedAt": "...",
+  "ownedByMe": false,
+  "unclaimed": false,
+  "fillColor": "#8A2BE2",
+  "strokeColor": "#8A2BE2",
+  "fillOpacity": 0.35,
+  "owner": {
+    "userId": "uuid",
+    "username": "runner42",
+    "displayName": "Sam",
+    "avatarUrl": "...",
+    "level": 5,
+    "xpPoints": 2100
+  }
+}
+```
+
+`territory_label` features additionally include `"ownerInitial": "S"` for rendering the CircleLayer label.
+
+**Color logic:** same as `/map/territories/live` — mine=`#CCFF00`, unclaimed=`#050505`/`#00E5FF`, others=`#8A2BE2`.
+
+**Response metadata:**
+```json
+{
+  "meta": { "total": 8, "mine": 2, "unclaimed": 3, "contested": 3, "radiusKm": 5, "centerLat": 28.6, "centerLon": 77.2 }
+}
+```
+
+---
+
 #### `GET /map/nearby-users`
 
 **Query params:** `?lat=X&lon=Y&radiusKm=5`
@@ -1242,4 +1294,10 @@ All endpoints return the same envelope:
 **Deployment:**
 - `Procfile`: `web: uvicorn main:app --host 0.0.0.0 --port $PORT`
 - Python version: 3.11 (set via `PYTHON_VERSION` env var on Render)
+
+
+
+
+
+
 

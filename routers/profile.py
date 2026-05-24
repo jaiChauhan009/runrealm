@@ -9,7 +9,18 @@ from utils import xp_calculator as xp
 router = APIRouter()
 
 
-def _build_profile(profile: dict) -> dict:
+def _total_distance(user_id: str, db: Client) -> float:
+    res = (
+        db.table("run_sessions")
+        .select("distance_km")
+        .eq("user_id", user_id)
+        .eq("status", "COMPLETED")
+        .execute()
+    )
+    return round(sum((r.get("distance_km") or 0) for r in (res.data or [])), 2)
+
+
+def _build_profile(profile: dict, total_distance_km: float = 0.0) -> dict:
     total_xp = profile.get("xp_points", 0) or 0
     return {
         "id": profile.get("id"),
@@ -23,6 +34,7 @@ def _build_profile(profile: dict) -> dict:
         "city": profile.get("city"),
         "totalRuns": profile.get("total_runs", 0),
         "totalCalories": profile.get("total_calories", 0),
+        "totalDistanceKm": total_distance_km,
         "currentStreak": profile.get("current_streak", 0),
         "bestStreak": profile.get("best_streak", 0),
         "territoryOwnedSqKm": profile.get("territory_owned_sq_km", 0),
@@ -44,7 +56,7 @@ def my_profile(user=Depends(get_current_user), db: Client = Depends(get_db)):
     res = db.table("user_profiles").select("*").eq("user_id", uid).single().execute()
     if not res.data:
         raise HTTPException(400, "Profile not found")
-    return ok(_build_profile(res.data))
+    return ok(_build_profile(res.data, _total_distance(uid, db)))
 
 
 @router.get("/{user_id}")
@@ -55,7 +67,7 @@ def public_profile(user_id: str, user=Depends(get_current_user), db: Client = De
     p = res.data
     if not p.get("is_public", True) and p.get("user_id") != user.id:
         raise HTTPException(400, "Profile is private")
-    return ok(_build_profile(p))
+    return ok(_build_profile(p, _total_distance(user_id, db)))
 
 
 @router.patch("")

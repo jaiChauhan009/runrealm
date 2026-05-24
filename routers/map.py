@@ -1,21 +1,16 @@
 """
-Map router — two concerns:
+Map router — four concerns:
 
-1. Running path  GET /map/route/{session_id}
-   Returns the session's GPS points as a GeoJSON FeatureCollection:
-     - A LineString of the full path
-     - Point markers for start / finish
-     - All territories within the route's bounding box with owner info
-
-2. Nearby users  GET /map/nearby-users
-   Returns other runners whose last known position is within `radiusKm`.
-   Used to populate the "People Near You" friend suggestion list.
-
-3. Location update  POST /map/location
-   Called every N seconds while a run is active so the server has a
-   fresh position to power the nearby-users feed.
+1. Running path      GET /map/route/{session_id}
+2. Nearby users      GET /map/nearby-users
+3. Location update   POST /map/location
+4. Territory layers  GET /map/territories/live      — Point features (centers), lightweight
+                     GET /map/territories/polygons  — Polygon + Point features per territory,
+                                                      used for the filled-area + owner-initial
+                                                      CircleLayer on the map
 """
 
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -374,5 +369,135 @@ def live_territories(
             "mine": sum(1 for f in features if f["properties"]["ownedByMe"]),
             "unclaimed": sum(1 for f in features if f["properties"]["unclaimed"]),
             "contested": sum(1 for f in features if not f["properties"]["ownedByMe"] and not f["properties"]["unclaimed"]),
+        },
+    })
+
+
+@router.get("/territories/polygons")
+def territory_polygons(
+    lat: float,
+    lon: float,
+    radiusKm: float = 5.0,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_db),
+):
+    """
+    Returns nearby territories as a GeoJSON FeatureCollection with two features
+    per territory:
+
+      • type="territory_polygon" — Polygon geometry from boundary_geo_json.
+        Used as a FillLayer to show the captured area.
+
+      • type="territory_label"   — Point geometry at the territory center.
+        Properties include ownerInitial for the CircleLayer label.
+
+    Both features share the same territoryId so the client can pair them.
+    Territories without boundary_geo_json are returned as Point-only.
+    """
+    uid = user.id
+    deg = min(radiusKm, 50.0) / 111.0
+
+    terr_res = (
+        db.table("territories")
+        .select("id,name,center_lat,center_lon,boundary_geo_json,captured_by,area_sq_km,point_value,capture_count,captured_at")
+        .gte("center_lat", lat - deg).lte("center_lat", lat + deg)
+        .gte("center_lon", lon - deg).lte("center_lon", lon + deg)
+        .execute()
+    )
+    territories = [
+        t for t in (terr_res.data or [])
+        if within_radius(lat, lon, t["center_lat"], t["center_lon"], radiusKm)
+    ]
+
+    owner_ids = list({t["captured_by"] for t in territories if t.get("captured_by")})
+    owner_map = {}
+    if owner_ids:
+        profiles = (
+            db.table("user_profiles")
+            .select("user_id,username,display_name,avatar_url,level,xp_points")
+            .in_("user_id", owner_ids)
+            .execute()
+        )
+        owner_map = {p["user_id"]: p for p in (profiles.data or [])}
+
+    features = []
+    for t in territories:
+        owner_id = t.get("captured_by")
+        owner = owner_map.get(owner_id, {})
+        owned_by_me = owner_id == uid
+        unclaimed = owner_id is None
+
+        fill_color = (
+            "#CCFF00" if owned_by_me
+            else "#050505" if unclaimed
+            else "#8A2BE2"
+        )
+        stroke_color = (
+            "#CCFF00" if owned_by_me
+            else "#00E5FF" if unclaimed
+            else "#8A2BE2"
+        )
+
+        username = owner.get("username", "")
+        owner_initial = username[0].upper() if username else "?"
+
+        shared_props = {
+            "territoryId": t["id"],
+            "name": t["name"],
+            "areaSqKm": t.get("area_sq_km", 0),
+            "pointValue": t.get("point_value", 100),
+            "captureCount": t.get("capture_count", 0),
+            "capturedAt": t.get("captured_at"),
+            "ownedByMe": owned_by_me,
+            "unclaimed": unclaimed,
+            "fillColor": fill_color,
+            "strokeColor": stroke_color,
+            "fillOpacity": 0.35,
+            "owner": {
+                "userId": owner.get("user_id"),
+                "username": username or None,
+                "displayName": owner.get("display_name"),
+                "avatarUrl": owner.get("avatar_url"),
+                "level": owner.get("level", 0),
+                "xpPoints": owner.get("xp_points", 0),
+            } if owner else None,
+        }
+
+        # Polygon feature (filled area)
+        raw_boundary = t.get("boundary_geo_json")
+        if raw_boundary:
+            boundary_geom = (
+                json.loads(raw_boundary)
+                if isinstance(raw_boundary, str)
+                else raw_boundary
+            )
+            features.append({
+                "type": "Feature",
+                "geometry": boundary_geom,
+                "properties": {**shared_props, "type": "territory_polygon"},
+            })
+
+        # Point feature (owner-initial circle)
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [t["center_lon"], t["center_lat"]]},
+            "properties": {
+                **shared_props,
+                "type": "territory_label",
+                "ownerInitial": owner_initial,
+            },
+        })
+
+    return ok({
+        "type": "FeatureCollection",
+        "features": features,
+        "meta": {
+            "total": len(territories),
+            "mine": sum(1 for t in territories if t.get("captured_by") == uid),
+            "unclaimed": sum(1 for t in territories if not t.get("captured_by")),
+            "contested": sum(1 for t in territories if t.get("captured_by") and t["captured_by"] != uid),
+            "radiusKm": radiusKm,
+            "centerLat": lat,
+            "centerLon": lon,
         },
     })
