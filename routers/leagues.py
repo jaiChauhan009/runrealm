@@ -399,11 +399,33 @@ def leave_league(
     role = _get_my_role(league_id, uid, db)
     if not role:
         raise HTTPException(400, "Not a member")
-    if role == "CREATOR":
-        raise HTTPException(400, "Creator cannot leave — delete the league instead")
 
+    if role != "CREATOR":
+        db.table("league_members").delete().eq("league_id", league_id).eq("user_id", uid).execute()
+        return ok(None, "Left league")
+
+    # Creator leaving — transfer ownership or delete if last member
+    others_res = (
+        db.table("league_members")
+        .select("user_id,role,joined_at")
+        .eq("league_id", league_id)
+        .neq("user_id", uid)
+        .order("joined_at")
+        .execute()
+    )
+    others = others_res.data or []
+
+    if not others:
+        db.table("leagues").delete().eq("id", league_id).execute()
+        return ok(None, "League deleted — you were the last member")
+
+    # Prefer oldest LEADER, fall back to oldest MEMBER (already ordered by joined_at)
+    successor = next((m for m in others if m["role"] == "LEADER"), others[0])
+    db.table("league_members").update({"role": "CREATOR"}).eq("league_id", league_id).eq("user_id", successor["user_id"]).execute()
     db.table("league_members").delete().eq("league_id", league_id).eq("user_id", uid).execute()
-    return ok(None, "Left league")
+    db.table("leagues").update({"creator_id": successor["user_id"]}).eq("id", league_id).execute()
+
+    return ok({"newCreatorId": successor["user_id"]}, "Left league — ownership transferred")
 
 
 @router.delete("/{league_id}")
