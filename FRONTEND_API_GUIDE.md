@@ -520,19 +520,308 @@ Incoming pending requests.
 
 ---
 
-## 9. Notifications
+## 9. Todos
+
+### Todo data model
+
+Every todo returned by the API has this shape:
+
+```json
+{
+  "id": "uuid",
+  "user_id": "uuid",
+  "title": "Morning stretching",
+  "description": "10 minutes",
+  "todo_date": "2026-05-23",
+  "category": "FITNESS",
+  "status": "PENDING",
+  "is_completed": false,
+  "completed_at": null,
+  "created_at": "2026-05-23T06:00:00Z"
+}
+```
+
+**Status values:**
+
+| `status` | `is_completed` | Meaning |
+|---|---|---|
+| `PENDING` | false | Not acted on yet |
+| `DONE` | true | Completed |
+| `CANCELLED` | false | Skipped / won't do |
+| `DEFERRED` | false | Do later |
+
+---
+
+### Circular status button — UI spec
+
+Each todo card has a **circular button on the left**, beside the title/description. Its icon and colour changes with `status`. There are no toast messages — the icon itself is the feedback.
+
+```
+┌─────────────────────────────────────────────┐
+│  ○  Morning stretching          [···]        │  ← PENDING:  empty/outline circle
+│     10 minutes · FITNESS                     │
+└─────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────┐
+│  ✓  Morning stretching          [···]        │  ← DONE:     green filled circle, ✓ inside
+│     10 minutes · FITNESS                     │    title has strikethrough
+└─────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────┐
+│  ✕  Morning stretching          [···]        │  ← CANCELLED: red filled circle, ✕ inside
+│     10 minutes · FITNESS                     │    title has strikethrough, card dimmed
+└─────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────┐
+│  ⏰  Morning stretching         [···]        │  ← DEFERRED: amber filled circle, clock inside
+│     10 minutes · FITNESS                     │    card has amber left border accent
+└─────────────────────────────────────────────┘
+```
+
+**Circle colours:**
+
+| status | Circle fill | Icon | Title |
+|---|---|---|---|
+| `PENDING` | transparent, border `#444` | none | normal |
+| `DONE` | `#CCFF00` (primary) | ✓ white | strikethrough, dimmed |
+| `CANCELLED` | `#FF6B6B` (danger) | ✕ white | strikethrough, dimmed |
+| `DEFERRED` | `#FFA500` amber | clock white | normal, amber left border on card |
+
+---
+
+### Tapping the circle — status picker
+
+**When status is PENDING**, tapping the circle opens an inline picker (bottom sheet or small pop-up anchored to the card) with 3 choices:
+
+```
+┌──────────────────────┐
+│  ✓  Done             │
+│  ✕  Cancel / Skip    │
+│  ⏰  Do Later        │
+└──────────────────────┘
+```
+
+User taps one → call `PATCH /todos/{id}/status` → icon on the circle updates immediately → picker closes. **No toast.**
+
+**When status is DONE / CANCELLED / DEFERRED**, tapping the circle re-opens the same picker so the user can change their selection. The current selection is highlighted. There is also an "Undo" / "Mark Pending" option to reset back to `PENDING`:
+
+```
+┌──────────────────────┐
+│  ✓  Done        ← ●  │  (current — highlighted)
+│  ✕  Cancel / Skip    │
+│  ⏰  Do Later        │
+│  ○  Mark Pending     │
+└──────────────────────┘
+```
+
+---
+
+### API calls for the status picker
+
+All calls go to the single generic endpoint — just change the `status` value:
+
+**Mark Done**
+```
+PATCH /api/v1/todos/{todoId}/status
+{ "status": "DONE" }
+```
+
+**Mark Cancelled**
+```
+PATCH /api/v1/todos/{todoId}/status
+{ "status": "CANCELLED" }
+```
+
+**Mark Deferred (Do Later)**
+```
+PATCH /api/v1/todos/{todoId}/status
+{ "status": "DEFERRED" }
+```
+
+**Undo / Reset to Pending**
+```
+PATCH /api/v1/todos/{todoId}/status
+{ "status": "PENDING" }
+```
+
+Response always returns the updated todo row. Update the card UI using the returned `status` field — no need to re-fetch the list.
+
+---
+
+### GET `/todos?todo_date=2026-05-23`
+
+Returns all todos for a date (defaults to today). Use `status` field to render each card's circle icon.
+
+```json
+{
+  "data": [
+    {
+      "id": "uuid-1",
+      "title": "Morning stretching",
+      "description": "10 minutes",
+      "todo_date": "2026-05-23",
+      "category": "FITNESS",
+      "status": "DONE",
+      "is_completed": true,
+      "completed_at": "2026-05-23T07:15:00Z",
+      "created_at": "2026-05-23T06:00:00Z"
+    },
+    {
+      "id": "uuid-2",
+      "title": "Evening run",
+      "description": null,
+      "todo_date": "2026-05-23",
+      "category": "GENERAL",
+      "status": "PENDING",
+      "is_completed": false,
+      "completed_at": null,
+      "created_at": "2026-05-23T06:01:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### POST `/todos`
+
+```json
+{
+  "title": "Evening run",
+  "description": "At least 3 km",
+  "todoDate": "2026-05-23",
+  "category": "FITNESS"
+}
+```
+
+New todos always start with `status: "PENDING"`.
+
+---
+
+### PATCH `/todos/{todoId}/status` ← primary action endpoint
+
+```json
+{ "status": "DONE" }
+```
+
+Accepts: `PENDING` | `DONE` | `CANCELLED` | `DEFERRED`
+
+---
+
+### PATCH `/todos/{todoId}` — edit title/description/category
+
+```json
+{
+  "title": "Updated title",
+  "description": "Updated desc",
+  "category": "FITNESS"
+}
+```
+
+All fields optional.
+
+---
+
+### DELETE `/todos/{todoId}`
+
+Hard delete. No body.
+
+---
+
+### GET `/todos/stats`
+
+```json
+{
+  "data": {
+    "daily":   { "completedCount": 3, "totalCount": 5, "percentage": 60.0 },
+    "weekly":  { "completedCount": 18, "totalCount": 30, "percentage": 60.0 },
+    "monthly": { "completedCount": 72, "totalCount": 120, "percentage": 60.0 },
+    "overallScore": 60.0
+  }
+}
+```
+
+---
+
+## 10. Notifications
 
 ### GET `/notifications?page=0&size=30`
+
+```json
+{
+  "data": {
+    "content": [
+      {
+        "id": "uuid",
+        "title": "Don't forget!",
+        "body": "Morning stretching is pending",
+        "notification_type": "TODO_REMINDER",
+        "is_read": false,
+        "reference_id": "todo-uuid",
+        "deep_link": "runrealm://todos/uuid",
+        "created_at": "2026-05-23T08:00:00Z"
+      }
+    ],
+    "totalElements": 5
+  }
+}
+```
+
+---
+
+### Notification bell — todo action UI
+
+When a notification has `notification_type == "TODO_REMINDER"`, show **inline action buttons** directly on the notification card inside the bell panel. Do not navigate away.
+
+```
+┌───────────────────────────────────────────────┐
+│  🔔  Don't forget!                            │
+│      Morning stretching is pending            │
+│                                               │
+│  [ ✓ Done ]  [ ✕ Skip ]  [ ⏰ Later ]        │
+└───────────────────────────────────────────────┘
+```
+
+Tapping any button calls:
+
+```
+POST /api/v1/notifications/{notificationId}/todo-action
+{ "status": "DONE" }          ← or "CANCELLED" or "DEFERRED"
+```
+
+This single call does both: updates the todo status **and** marks the notification as read. Response:
+
+```json
+{
+  "data": {
+    "todo": {
+      "id": "todo-uuid",
+      "title": "Morning stretching",
+      "status": "DONE",
+      "is_completed": true,
+      "completed_at": "2026-05-23T08:05:00Z"
+    }
+  },
+  "message": "Todo marked as DONE"
+}
+```
+
+After the call, replace the 3 action buttons with the icon that matches the chosen status (same circle icon as the todo card): ✓ green / ✕ red / ⏰ amber. **No toast.**
+
+**Precondition for this to work:** when the server creates a `TODO_REMINDER` notification, it must set `reference_id = <todo_id>`. The `notification_type` must be exactly `"TODO_REMINDER"`.
+
+---
+
 ### GET `/notifications/unread-count` → `{ "unreadCount": 3 }`
 ### POST `/notifications/read-all`
 ### POST `/notifications/{notificationId}/read`
 
-**Notification types:**
+**Other notification types:**
 `STREAK_REMINDER` · `CHALLENGE_INVITE` · `TERRITORY_LOST` · `ACHIEVEMENT_UNLOCKED` · `FRIEND_RUN` · `LEVEL_UP` · `SYNC_COMPLETE` · `SYSTEM`
 
 ---
 
-## 10. Profile
+## 11. Profile
 
 ### GET `/profile`
 Own full profile.
@@ -554,7 +843,7 @@ All fields optional — only include what changed.
 
 ---
 
-## 11. Offline Sync
+## 12. Offline Sync
 
 ### POST `/sync/batch`
 Send all offline writes in one batch when connectivity restores. **Idempotent** — safe to retry.

@@ -1,13 +1,20 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
 from database import get_db
-from schemas import TodoCreateRequest, TodoUpdateRequest, ok
+from schemas import TodoCreateRequest, TodoStatusRequest, TodoUpdateRequest, ok
 
 router = APIRouter()
+
+
+def _get_owned_todo(todo_id: str, uid: str, db: Client):
+    res = db.table("daily_todos").select("*").eq("id", todo_id).eq("user_id", uid).execute()
+    if not res.data:
+        raise HTTPException(404, "Todo not found")
+    return res.data[0]
 
 
 @router.get("")
@@ -38,20 +45,44 @@ def create_todo(body: TodoCreateRequest, user=Depends(get_current_user), db: Cli
         "description": body.description,
         "todo_date": (body.todoDate or date.today()).isoformat(),
         "category": body.category or "GENERAL",
+        "status": "PENDING",
         "is_completed": False,
+        "scheduled_at": body.scheduledAt.isoformat() if body.scheduledAt else None,
     }
     res = db.table("daily_todos").insert(row).execute()
     return ok(res.data[0])
 
 
+@router.patch("/{todo_id}/status")
+def set_todo_status(
+    todo_id: str,
+    body: TodoStatusRequest,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_db),
+):
+    """
+    Generic status setter — accepts PENDING | DONE | CANCELLED | DEFERRED.
+    This is the primary endpoint for Done / Cancel / Do Later / Undo actions.
+    """
+    uid = user.id
+    _get_owned_todo(todo_id, uid, db)
+
+    is_completed = body.status == "DONE"
+    update = {
+        "status": body.status,
+        "is_completed": is_completed,
+        "completed_at": datetime.now(timezone.utc).isoformat() if is_completed else None,
+    }
+    res = db.table("daily_todos").update(update).eq("id", todo_id).execute()
+    return ok(res.data[0])
+
+
 @router.patch("/{todo_id}/complete")
 def complete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
-    from datetime import datetime, timezone
     uid = user.id
-    existing = db.table("daily_todos").select("id").eq("id", todo_id).eq("user_id", uid).execute()
-    if not existing.data:
-        raise HTTPException(404, "Todo not found")
+    _get_owned_todo(todo_id, uid, db)
     res = db.table("daily_todos").update({
+        "status": "DONE",
         "is_completed": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", todo_id).execute()
@@ -61,10 +92,33 @@ def complete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Dep
 @router.patch("/{todo_id}/incomplete")
 def incomplete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
-    existing = db.table("daily_todos").select("id").eq("id", todo_id).eq("user_id", uid).execute()
-    if not existing.data:
-        raise HTTPException(404, "Todo not found")
+    _get_owned_todo(todo_id, uid, db)
     res = db.table("daily_todos").update({
+        "status": "PENDING",
+        "is_completed": False,
+        "completed_at": None,
+    }).eq("id", todo_id).execute()
+    return ok(res.data[0])
+
+
+@router.patch("/{todo_id}/cancel")
+def cancel_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
+    uid = user.id
+    _get_owned_todo(todo_id, uid, db)
+    res = db.table("daily_todos").update({
+        "status": "CANCELLED",
+        "is_completed": False,
+        "completed_at": None,
+    }).eq("id", todo_id).execute()
+    return ok(res.data[0])
+
+
+@router.patch("/{todo_id}/defer")
+def defer_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
+    uid = user.id
+    _get_owned_todo(todo_id, uid, db)
+    res = db.table("daily_todos").update({
+        "status": "DEFERRED",
         "is_completed": False,
         "completed_at": None,
     }).eq("id", todo_id).execute()
@@ -74,9 +128,7 @@ def incomplete_todo(todo_id: str, user=Depends(get_current_user), db: Client = D
 @router.patch("/{todo_id}")
 def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
-    existing = db.table("daily_todos").select("id").eq("id", todo_id).eq("user_id", uid).execute()
-    if not existing.data:
-        raise HTTPException(404, "Todo not found")
+    existing = _get_owned_todo(todo_id, uid, db)
     update = {}
     if body.title is not None:
         update["title"] = body.title
@@ -85,7 +137,7 @@ def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_
     if body.category is not None:
         update["category"] = body.category
     if not update:
-        return ok(existing.data[0])
+        return ok(existing)
     res = db.table("daily_todos").update(update).eq("id", todo_id).execute()
     return ok(res.data[0])
 
@@ -93,9 +145,7 @@ def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_
 @router.delete("/{todo_id}")
 def delete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
-    existing = db.table("daily_todos").select("id").eq("id", todo_id).eq("user_id", uid).execute()
-    if not existing.data:
-        raise HTTPException(404, "Todo not found")
+    _get_owned_todo(todo_id, uid, db)
     db.table("daily_todos").delete().eq("id", todo_id).execute()
     return ok(None, "Todo deleted")
 
@@ -121,14 +171,11 @@ def todo_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
         done  = sum(1 for r in rows if r["is_completed"])
         return done, total
 
-    # Daily
     d_done, d_total = _fetch(today.isoformat(), today.isoformat())
 
-    # Weekly
     week_start = (today - timedelta(days=6)).isoformat()
     w_done, w_total = _fetch(week_start, today.isoformat())
 
-    # Monthly
     month_start = (today - timedelta(days=29)).isoformat()
     m_done, m_total = _fetch(month_start, today.isoformat())
 

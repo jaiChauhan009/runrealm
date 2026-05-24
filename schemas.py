@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -119,9 +119,18 @@ class TodoCreateRequest(BaseModel):
     description: Optional[str] = None
     todoDate: Optional[date] = None
     category: Optional[str] = "GENERAL"
+    scheduledAt: Optional[datetime] = None
 
 
 class TodoUpdateRequest(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     description: Optional[str] = None
     category: Optional[str] = None
+
+
+class TodoStatusRequest(BaseModel):
+    status: Literal["PENDING", "DONE", "CANCELLED", "DEFERRED"]
+
+
+class NotificationTodoActionRequest(BaseModel):
+    status: Literal["DONE", "CANCELLED", "DEFERRED"]

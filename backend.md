@@ -4,17 +4,6 @@ FastAPI + Supabase backend for RunRealm — a gamified fitness app where users r
 
 ---
 
-
-
-this is mine backend we had handled we have to make a todo system in which from calender we can access that day todos also we can our montlhly weakely and daily stasts of task completion and we can our task        
-  complete or not like check mark and apart of it we get pop  like notification box with some quote or some worklikfe or for health including food quote and under it mark 3 buttons one of complete one to not done ,     
-  check , cross and do later adn on click and for which task we are doing and it can give a line to show percentage of weekly and montly and daily stats we can mark itming to show nottification and if we mark later     
-  then do after 30 min notification and add a more button from where we can access profile settings to set timer to reshedule notification and other thigns to set theme dark and light and logout button keep map screen  
-  ,and home in which start run and stats of running and habit daily task completion and keep social and more and make a screen of daily task mark check and completion form app , a todo screen to handle all todos and at 
-   top a first leeter button in right corner in place of logout from on click on circle icon we can access profile screen and and keep more button at place of profile screen icon , and handle offlien or online mode     
-  both to access or to handle data on online or offline mode and does on our backend there we had manage or not if not then give me what to do in backend to make complete able to handle from frontend now do or make     
-  code according to given command
-
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
@@ -31,6 +20,7 @@ this is mine backend we had handled we have to make a todo system in which from 
    - [Leaderboard](#leaderboard)
    - [Map & Location](#map--location)
    - [Notifications](#notifications)
+   - [Profile](#profile)
    - [Content (Quotes & Tips)](#content-quotes--tips)
    - [Sync (Offline-first)](#sync-offline-first)
 5. [XP & Leveling System](#xp--leveling-system)
@@ -596,15 +586,54 @@ Returns all todos for that date for the current user, ordered by `created_at ASC
 
 ---
 
+#### Todo status field
+
+Every todo now carries a `status` field in addition to `is_completed`:
+
+| status | is_completed | UI indicator |
+|--------|-------------|--------------|
+| `PENDING` | false | 3 action buttons: Done / Cancel / Later |
+| `DONE` | true | Green ✓ checkmark, title strikethrough |
+| `CANCELLED` | false | Red ✗ cross, title strikethrough |
+| `DEFERRED` | false | Amber clock icon, separate visual treatment |
+
+Any status can be changed back to another by calling the status endpoint again.
+
+---
+
+#### `PATCH /todos/{todo_id}/status` ★ primary action endpoint
+
+**Request:**
+```json
+{ "status": "DONE" }
+```
+Accepts: `PENDING` | `DONE` | `CANCELLED` | `DEFERRED`
+
+Sets `status`, syncs `is_completed` (true only for DONE), and sets/clears `completed_at`.
+
+---
+
 #### `PATCH /todos/{todo_id}/complete`
 
-Sets `is_completed=true` and `completed_at=utcnow()`. No request body.
+Shorthand — sets `status=DONE`, `is_completed=true`, `completed_at=utcnow()`. No request body.
 
 ---
 
 #### `PATCH /todos/{todo_id}/incomplete`
 
-Sets `is_completed=false` and `completed_at=null`.
+Shorthand — sets `status=PENDING`, `is_completed=false`, `completed_at=null`.
+
+---
+
+#### `PATCH /todos/{todo_id}/cancel`
+
+Sets `status=CANCELLED`. No request body.
+
+---
+
+#### `PATCH /todos/{todo_id}/defer`
+
+Sets `status=DEFERRED` ("Do Later"). No request body.
 
 ---
 
@@ -942,6 +971,104 @@ Sets `is_read=true` for a single notification (validates ownership).
 
 ---
 
+#### `POST /notifications/{notification_id}/todo-action`
+
+Updates a todo's status directly from the notification bell — no need to navigate to the todo screen.
+
+**Preconditions:**
+- Notification must be owned by the current user
+- `notification_type` must be `"TODO_REMINDER"`
+- `reference_id` must point to a valid todo owned by the current user
+
+**Request:**
+```json
+{ "status": "DONE" }
+```
+Accepts: `DONE` | `CANCELLED` | `DEFERRED`
+
+**Flow:**
+1. Validates notification ownership and type
+2. Resolves `reference_id` → todo, validates ownership
+3. Updates todo status (same logic as `PATCH /todos/{id}/status`)
+4. Marks the notification as read
+
+**Response data:**
+```json
+{ "todo": { ...updated todo row... } }
+```
+
+**Creating TODO_REMINDER notifications (server-side):** when creating a notification that should support in-notification todo actions, set:
+- `notification_type = "TODO_REMINDER"`
+- `reference_id = <todo_id>`
+
+---
+
+### Profile
+
+**Router:** `routers/profile.py` — prefix `/profile`
+
+#### `GET /profile`
+
+Returns the current user's full profile.
+
+**Response data:**
+```json
+{
+  "id": "uuid",
+  "userId": "uuid",
+  "username": "runner99",
+  "level": 6,
+  "xpPoints": 3400,
+  "displayName": "Alex",
+  "avatarUrl": "https://...",
+  "bio": "I run therefore I am",
+  "city": "Delhi",
+  "totalRuns": 42,
+  "totalCalories": 18500,
+  "currentStreak": 5,
+  "bestStreak": 12,
+  "territoryOwnedSqKm": 2.3,
+  "territoriesCaptured": 4,
+  "isPublic": true,
+  "updatedAt": "2025-02-14T10:00:00Z",
+  "socialLinks": {
+    "instagram": "runner99",
+    "twitter": null,
+    "strava": "https://strava.com/athletes/...",
+    "linkedin": null
+  }
+}
+```
+
+---
+
+#### `GET /profile/{user_id}`
+
+Returns any user's public profile. Returns `400` if profile not found or if `isPublic=false` and requester is not the owner.
+
+---
+
+#### `PATCH /profile`
+
+Updates the current user's profile. All fields are optional — only provided (non-null) fields are applied.
+
+**Request:**
+```json
+{
+  "displayName": "Alex Runner",
+  "bio": "Trail runner",
+  "city": "Mumbai",
+  "avatarUrl": "https://...",
+  "isPublic": true,
+  "instagramHandle": "alex_runs",
+  "twitterHandle": "alexruns",
+  "stravaUrl": "https://strava.com/athletes/123",
+  "linkedinUrl": null
+}
+```
+
+---
+
 ### Content (Quotes & Tips)
 
 **Router:** `routers/content.py` — prefix `/content`
@@ -1115,3 +1242,4 @@ All endpoints return the same envelope:
 **Deployment:**
 - `Procfile`: `web: uvicorn main:app --host 0.0.0.0 --port $PORT`
 - Python version: 3.11 (set via `PYTHON_VERSION` env var on Render)
+
