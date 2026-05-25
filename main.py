@@ -1,10 +1,14 @@
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
+
+_start_time = time.monotonic()
 
 from postgrest.exceptions import APIError as PostgRESTError
 
@@ -40,6 +44,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -122,4 +127,8 @@ app.include_router(content.router,       prefix="/api/v1/content",       tags=["
 
 @app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {
+        "status": "ok",
+        "uptime_seconds": int(time.monotonic() - _start_time),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }

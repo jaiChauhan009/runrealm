@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_invalidate
 from database import get_db
 from schemas import EndSessionRequest, RoutePointRequest, StartSessionRequest, ok
 from utils import xp_calculator as xp
@@ -130,11 +131,19 @@ def end_session(
     _award_xp(db, uid, xp_earned, "RUN_COMPLETE", session_id,
               f"Completed {body.distanceKm:.2f} km run")
 
-    # Update profile totals
-    profile = db.table("user_profiles").select("total_runs,total_calories").eq("user_id", uid).single().execute().data or {}
+    # Update profile totals (single round trip)
+    profile = (
+        db.table("user_profiles")
+        .select("total_runs, total_calories, total_distance_km")
+        .eq("user_id", uid)
+        .single()
+        .execute()
+        .data or {}
+    )
     db.table("user_profiles").update({
         "total_runs": (profile.get("total_runs") or 0) + 1,
         "total_calories": (profile.get("total_calories") or 0) + (body.caloriesBurned or 0),
+        "total_distance_km": round((profile.get("total_distance_km") or 0) + body.distanceKm, 3),
     }).eq("user_id", uid).execute()
 
     # Activity feed
@@ -146,6 +155,9 @@ def end_session(
         "metadata_json": f'{{"distanceKm":{body.distanceKm},"durationSec":{duration},"calories":{body.caloriesBurned or 0}}}',
         "is_public": True,
     }).execute()
+
+    # Invalidate dashboard cache so next fetch reflects new XP, streak, and stats
+    cache_invalidate(f"dashboard:{uid}")
 
     return ok(res.data[0])
 

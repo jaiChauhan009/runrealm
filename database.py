@@ -16,14 +16,14 @@ def get_db() -> Client:
 
 async def test_connection() -> None:
     try:
-        # Lightweight auth ping — works even before tables are created
+        # Prime both Auth and PostgREST connections so the first real request
+        # doesn't pay the connection-establishment cost.
         supabase.auth.get_session()
-        print(f"✅  Supabase connected → {SUPABASE_URL}")
+        supabase.table("user_profiles").select("id").limit(1).execute()
+        print(f"✅  Supabase connected and warmed → {SUPABASE_URL}")
     except Exception as exc:
-        # Connection-level failure (bad URL / key)
         if "Invalid API key" in str(exc) or "connection" in str(exc).lower():
             print(f"❌  Supabase connection failed: {exc}")
             raise
-        # Table-not-found etc. — DB reachable, schema just not created yet
         print(f"✅  Supabase connected → {SUPABASE_URL}")
         print(f"⚠️   Run migrations/schema.sql in Supabase SQL Editor first")

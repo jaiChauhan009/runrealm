@@ -10,12 +10,17 @@ from schemas import TodoCreateRequest, TodoStatusRequest, TodoUpdateRequest, ok
 router = APIRouter()
 
 
-def _get_owned_todo(todo_id: str, uid: str, db: Client):
-    res = db.table("daily_todos").select("*").eq("id", todo_id).eq("user_id", uid).execute()
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _owned_update(todo_id: str, uid: str, update: dict, db: Client) -> dict:
+    """UPDATE with ownership guard in one round trip. Raises 404 if not found."""
+    res = db.table("daily_todos").update(update).eq("id", todo_id).eq("user_id", uid).execute()
     if not res.data:
         raise HTTPException(404, "Todo not found")
     return res.data[0]
 
+
+# ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("")
 def list_todos(
@@ -60,76 +65,55 @@ def set_todo_status(
     user=Depends(get_current_user),
     db: Client = Depends(get_db),
 ):
-    """
-    Generic status setter — accepts PENDING | DONE | CANCELLED | DEFERRED.
-    This is the primary endpoint for Done / Cancel / Do Later / Undo actions.
-    """
     uid = user.id
-    _get_owned_todo(todo_id, uid, db)
-
     is_completed = body.status == "DONE"
-    update = {
+    return ok(_owned_update(todo_id, uid, {
         "status": body.status,
         "is_completed": is_completed,
         "completed_at": datetime.now(timezone.utc).isoformat() if is_completed else None,
-    }
-    res = db.table("daily_todos").update(update).eq("id", todo_id).execute()
-    return ok(res.data[0])
+    }, db))
 
 
 @router.patch("/{todo_id}/complete")
 def complete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
-    uid = user.id
-    _get_owned_todo(todo_id, uid, db)
-    res = db.table("daily_todos").update({
+    return ok(_owned_update(todo_id, user.id, {
         "status": "DONE",
         "is_completed": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", todo_id).execute()
-    return ok(res.data[0])
+    }, db))
 
 
 @router.patch("/{todo_id}/incomplete")
 def incomplete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
-    uid = user.id
-    _get_owned_todo(todo_id, uid, db)
-    res = db.table("daily_todos").update({
+    return ok(_owned_update(todo_id, user.id, {
         "status": "PENDING",
         "is_completed": False,
         "completed_at": None,
-    }).eq("id", todo_id).execute()
-    return ok(res.data[0])
+    }, db))
 
 
 @router.patch("/{todo_id}/cancel")
 def cancel_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
-    uid = user.id
-    _get_owned_todo(todo_id, uid, db)
-    res = db.table("daily_todos").update({
+    return ok(_owned_update(todo_id, user.id, {
         "status": "CANCELLED",
         "is_completed": False,
         "completed_at": None,
-    }).eq("id", todo_id).execute()
-    return ok(res.data[0])
+    }, db))
 
 
 @router.patch("/{todo_id}/defer")
 def defer_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
-    uid = user.id
-    _get_owned_todo(todo_id, uid, db)
-    res = db.table("daily_todos").update({
+    return ok(_owned_update(todo_id, user.id, {
         "status": "DEFERRED",
         "is_completed": False,
         "completed_at": None,
-    }).eq("id", todo_id).execute()
-    return ok(res.data[0])
+    }, db))
 
 
 @router.patch("/{todo_id}")
 def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
-    existing = _get_owned_todo(todo_id, uid, db)
-    update = {}
+    update: dict = {}
     if body.title is not None:
         update["title"] = body.title
     if body.description is not None:
@@ -137,16 +121,17 @@ def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_
     if body.category is not None:
         update["category"] = body.category
     if not update:
-        return ok(existing)
-    res = db.table("daily_todos").update(update).eq("id", todo_id).execute()
-    return ok(res.data[0])
+        res = db.table("daily_todos").select("*").eq("id", todo_id).eq("user_id", uid).execute()
+        if not res.data:
+            raise HTTPException(404, "Todo not found")
+        return ok(res.data[0])
+    return ok(_owned_update(todo_id, uid, update, db))
 
 
 @router.delete("/{todo_id}")
 def delete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
-    _get_owned_todo(todo_id, uid, db)
-    db.table("daily_todos").delete().eq("id", todo_id).execute()
+    db.table("daily_todos").delete().eq("id", todo_id).eq("user_id", uid).execute()
     return ok(None, "Todo deleted")
 
 
@@ -154,35 +139,44 @@ def delete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depen
 def todo_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
     today = date.today()
+    month_start = (today - timedelta(days=29)).isoformat()
+    today_str = today.isoformat()
+    week_start = (today - timedelta(days=6)).isoformat()
+
+    # One query for 30 days — aggregate daily / weekly / monthly in Python
+    res = (
+        db.table("daily_todos")
+        .select("todo_date, is_completed")
+        .eq("user_id", uid)
+        .gte("todo_date", month_start)
+        .lte("todo_date", today_str)
+        .execute()
+    )
+    rows = res.data or []
+
+    d_total = d_done = w_total = w_done = 0
+    for r in rows:
+        td = r["todo_date"]
+        done = r["is_completed"]
+        if td == today_str:
+            d_total += 1
+            if done:
+                d_done += 1
+        if week_start <= td <= today_str:
+            w_total += 1
+            if done:
+                w_done += 1
+
+    m_total = len(rows)
+    m_done = sum(1 for r in rows if r["is_completed"])
 
     def _pct(done: int, total: int) -> float:
         return round((done / total) * 100, 1) if total > 0 else 0.0
 
-    def _fetch(start: str, end: str):
-        res = (
-            db.table("daily_todos").select("is_completed")
-            .eq("user_id", uid)
-            .gte("todo_date", start)
-            .lte("todo_date", end)
-            .execute()
-        )
-        rows = res.data or []
-        total = len(rows)
-        done  = sum(1 for r in rows if r["is_completed"])
-        return done, total
-
-    d_done, d_total = _fetch(today.isoformat(), today.isoformat())
-
-    week_start = (today - timedelta(days=6)).isoformat()
-    w_done, w_total = _fetch(week_start, today.isoformat())
-
-    month_start = (today - timedelta(days=29)).isoformat()
-    m_done, m_total = _fetch(month_start, today.isoformat())
-
     daily_pct   = _pct(d_done, d_total)
     weekly_pct  = _pct(w_done, w_total)
     monthly_pct = _pct(m_done, m_total)
-    overall     = round((daily_pct * 0.4 + weekly_pct * 0.35 + monthly_pct * 0.25), 1)
+    overall     = round(daily_pct * 0.4 + weekly_pct * 0.35 + monthly_pct * 0.25, 1)
 
     return ok({
         "daily":   {"completedCount": d_done, "totalCount": d_total, "percentage": daily_pct},

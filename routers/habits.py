@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_invalidate
 from database import get_db
 from schemas import HabitCreateRequest, HabitLogRequest, ok
 from utils import xp_calculator as xp
@@ -85,6 +86,9 @@ def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: Client 
             "xp_points": new_xp,
             "level": xp.level_from_xp(new_xp),
         }).eq("user_id", uid).execute()
+
+    # Invalidate dashboard cache so today's habit progress reflects immediately
+    cache_invalidate(f"dashboard:{uid}")
 
     return ok(res.data[0])
 

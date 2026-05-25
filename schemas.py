@@ -149,3 +149,9 @@ class LeagueCreateRequest(BaseModel):
     description: Optional[str] = None
     scope: Literal["GLOBAL", "COUNTRY", "STATE", "LOCAL"] = "GLOBAL"
     socialLinks: Optional[List[SocialLinkItem]] = None
+
+
+# ── territories ───────────────────────────────────────────────────────────────
+
+class TerritoryClaimRequest(BaseModel):
+    sessionId: str

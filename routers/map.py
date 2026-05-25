@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import Client
 
@@ -488,7 +489,10 @@ def territory_polygons(
             },
         })
 
-    return ok({
+    # Return raw GeoJSON — the Android client uses bodyAsText() and feeds this
+    # directly into MapLibre's GeoJsonSource.setGeoJson(), which requires a
+    # plain FeatureCollection string, not the ok()-wrapped envelope.
+    return JSONResponse(content={
         "type": "FeatureCollection",
         "features": features,
         "meta": {

@@ -2,10 +2,8 @@ import random
 from datetime import date
 
 from fastapi import APIRouter, Depends
-from supabase import Client
 
 from auth import get_current_user
-from database import get_db
 from schemas import ok
 
 router = APIRouter()
@@ -61,14 +59,26 @@ _HEALTH_TIPS = [
     {"category": "WORKLIFE", "tip": "Exercise and nature (RunRealm's map feature) together are a double stress-buster."},
 ]
 
+# Cache today's seeded picks so every request in the same day is O(1)
+_daily_cache: dict = {}
+
+
+def _get_daily(seed_offset: int = 0) -> dict:
+    today = date.today().isoformat()
+    key = f"{today}:{seed_offset}"
+    if key not in _daily_cache:
+        seed = int(today.replace("-", "")) + seed_offset
+        random.seed(seed)
+        _daily_cache[key] = {
+            "quote": random.choice(_QUOTES),
+            "tip": random.choice(_HEALTH_TIPS),
+        }
+    return _daily_cache[key]
+
 
 @router.get("/quote")
 def daily_quote(user=Depends(get_current_user)):
-    # Deterministic by date so the same quote shows all day, rotates daily
-    seed = int(date.today().strftime("%Y%m%d"))
-    random.seed(seed)
-    quote = random.choice(_QUOTES)
-    return ok(quote)
+    return ok(_get_daily(0)["quote"])
 
 
 @router.get("/quote/random")
@@ -78,10 +88,7 @@ def random_quote(user=Depends(get_current_user)):
 
 @router.get("/tip")
 def daily_tip(user=Depends(get_current_user)):
-    seed = int(date.today().strftime("%Y%m%d")) + 1
-    random.seed(seed)
-    tip = random.choice(_HEALTH_TIPS)
-    return ok(tip)
+    return ok(_get_daily(1)["tip"])
 
 
 @router.get("/tip/random")
@@ -91,17 +98,11 @@ def random_tip(
 ):
     pool = _HEALTH_TIPS
     if category:
-        pool = [t for t in _HEALTH_TIPS if t["category"].upper() == category.upper()]
-    if not pool:
-        pool = _HEALTH_TIPS
+        pool = [t for t in _HEALTH_TIPS if t["category"].upper() == category.upper()] or _HEALTH_TIPS
     return ok(random.choice(pool))
 
 
 @router.get("/feed")
 def content_feed(user=Depends(get_current_user)):
-    seed = int(date.today().strftime("%Y%m%d"))
-    random.seed(seed)
-    return ok({
-        "quote": random.choice(_QUOTES),
-        "tip": random.choice(_HEALTH_TIPS),
-    })
+    daily = _get_daily(0)
+    return ok({"quote": daily["quote"], "tip": daily["tip"]})

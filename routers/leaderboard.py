@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_get, cache_set
 from database import get_db
 from schemas import ok
 
@@ -67,6 +68,11 @@ def leaderboard(
         raise HTTPException(400, "type must be 'xp' or 'distance'")
 
     top = min(top, 100)
+    cache_key = f"leaderboard:{scope}:{league_id}:{type}:{top}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     scope_ids = _resolve_scope(scope, league_id, user.id, db)
 
     if type == "xp":
@@ -136,4 +142,6 @@ def leaderboard(
             for i, (uid, dist) in enumerate(sorted_entries)
         ]
 
-    return ok(entries)
+    result = ok(entries)
+    cache_set(cache_key, result, ttl_seconds=60)
+    return result

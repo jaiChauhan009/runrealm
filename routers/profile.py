@@ -9,7 +9,8 @@ from utils import xp_calculator as xp
 router = APIRouter()
 
 
-def _total_distance(user_id: str, db: Client) -> float:
+def _total_distance_fallback(user_id: str, db: Client) -> float:
+    """Scan all sessions — only called when total_distance_km column is missing/zero."""
     res = (
         db.table("run_sessions")
         .select("distance_km")
@@ -20,7 +21,7 @@ def _total_distance(user_id: str, db: Client) -> float:
     return round(sum((r.get("distance_km") or 0) for r in (res.data or [])), 2)
 
 
-def _build_profile(profile: dict, total_distance_km: float = 0.0) -> dict:
+def _build_profile(profile: dict, total_distance_km: float) -> dict:
     total_xp = profile.get("xp_points", 0) or 0
     return {
         "id": profile.get("id"),
@@ -50,13 +51,22 @@ def _build_profile(profile: dict, total_distance_km: float = 0.0) -> dict:
     }
 
 
+def _resolve_distance(profile: dict, uid: str, db: Client) -> float:
+    """Read from column if available; fall back to session sum (pre-migration)."""
+    stored = profile.get("total_distance_km")
+    if stored is not None and stored > 0:
+        return round(stored, 2)
+    return _total_distance_fallback(uid, db)
+
+
 @router.get("")
 def my_profile(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
     res = db.table("user_profiles").select("*").eq("user_id", uid).single().execute()
     if not res.data:
         raise HTTPException(400, "Profile not found")
-    return ok(_build_profile(res.data, _total_distance(uid, db)))
+    p = res.data
+    return ok(_build_profile(p, _resolve_distance(p, uid, db)))
 
 
 @router.get("/{user_id}")
@@ -67,7 +77,7 @@ def public_profile(user_id: str, user=Depends(get_current_user), db: Client = De
     p = res.data
     if not p.get("is_public", True) and p.get("user_id") != user.id:
         raise HTTPException(400, "Profile is private")
-    return ok(_build_profile(p, _total_distance(user_id, db)))
+    return ok(_build_profile(p, _resolve_distance(p, user_id, db)))
 
 
 @router.patch("")
@@ -99,9 +109,11 @@ def update_profile(
 
     if not update:
         res = db.table("user_profiles").select("*").eq("user_id", uid).single().execute()
-        return ok(_build_profile(res.data))
+        p = res.data
+        return ok(_build_profile(p, _resolve_distance(p, uid, db)))
 
     res = db.table("user_profiles").update(update).eq("user_id", uid).execute()
     if not res.data:
         raise HTTPException(400, "Profile not found")
-    return ok(_build_profile(res.data[0]))
+    p = res.data[0]
+    return ok(_build_profile(p, _resolve_distance(p, uid, db)))

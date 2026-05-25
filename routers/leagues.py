@@ -52,7 +52,7 @@ def _enrich_members(members: list, db: Client) -> list:
     user_ids = [m["user_id"] for m in members]
     profiles_res = (
         db.table("user_profiles")
-        .select("user_id,username,display_name,avatar_url,level,xp_points")
+        .select("user_id,username,display_name,avatar_url,level,xp_points,total_runs,total_distance_km")
         .in_("user_id", user_ids)
         .execute()
     )
@@ -69,11 +69,13 @@ def _enrich_members(members: list, db: Client) -> list:
             "avatarUrl": p.get("avatar_url"),
             "level": p.get("level", 1),
             "xpPoints": p.get("xp_points", 0),
+            "totalRuns": p.get("total_runs", 0),
+            "totalDistanceKm": round(p.get("total_distance_km") or 0.0, 2),
         })
     return result
 
 
-def _league_summary(league: dict, member_count: int, my_role: Optional[str]) -> dict:
+def _league_summary(league: dict, member_count: int, my_role: Optional[str], has_pending_request: bool = False) -> dict:
     return {
         "id": league["id"],
         "name": league["name"],
@@ -84,6 +86,7 @@ def _league_summary(league: dict, member_count: int, my_role: Optional[str]) -> 
         "createdAt": league.get("created_at"),
         "memberCount": member_count,
         "myRole": my_role,
+        "hasPendingJoinRequest": has_pending_request,
         "deleteVoteDeadline": league.get("vote_deadline"),
     }
 
@@ -150,8 +153,19 @@ def list_leagues(
     )
     my_roles = {m["league_id"]: m["role"] for m in (my_res.data or [])}
 
+    # My pending join requests
+    pending_res = (
+        db.table("league_join_requests")
+        .select("league_id")
+        .eq("user_id", uid)
+        .eq("status", "PENDING")
+        .in_("league_id", league_ids)
+        .execute()
+    )
+    pending_ids = {r["league_id"] for r in (pending_res.data or [])}
+
     return ok([
-        _league_summary(l, member_counts.get(l["id"], 0), my_roles.get(l["id"]))
+        _league_summary(l, member_counts.get(l["id"], 0), my_roles.get(l["id"]), l["id"] in pending_ids)
         for l in leagues
     ])
 

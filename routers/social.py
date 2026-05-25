@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
@@ -6,6 +8,30 @@ from database import get_db
 from schemas import ok
 
 router = APIRouter()
+
+
+def _profile_map(user_ids: list[str], db: Client) -> dict:
+    """Fetch profile fields for a list of user_ids in one query."""
+    if not user_ids:
+        return {}
+    res = (
+        db.table("user_profiles")
+        .select("user_id, username, display_name, avatar_url, level, xp_points")
+        .in_("user_id", user_ids)
+        .execute()
+    )
+    return {p["user_id"]: p for p in (res.data or [])}
+
+
+def _to_friend_dto(uid: str, profile: dict) -> dict:
+    return {
+        "userId": uid,
+        "username": profile.get("username", ""),
+        "displayName": profile.get("display_name"),
+        "avatarUrl": profile.get("avatar_url"),
+        "level": profile.get("level", 1),
+        "xpPoints": profile.get("xp_points", 0),
+    }
 
 
 @router.get("/feed")
@@ -17,7 +43,6 @@ def activity_feed(
 ):
     uid = user.id
 
-    # Get friend IDs
     friends_res = (
         db.table("user_friends")
         .select("friend_id, user_id")
@@ -77,8 +102,6 @@ def send_friend_request(friend_id: str, user=Depends(get_current_user), db: Clie
 @router.post("/friends/{friend_id}/accept")
 def accept_friend_request(friend_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
-    from datetime import datetime, timezone
-
     req = (
         db.table("user_friends")
         .select("id")
@@ -102,12 +125,18 @@ def list_friends(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
     res = (
         db.table("user_friends")
-        .select("*")
+        .select("user_id, friend_id")
         .eq("status", "ACCEPTED")
         .or_(f"user_id.eq.{uid},friend_id.eq.{uid}")
         .execute()
     )
-    return ok(res.data or [])
+    rows = res.data or []
+    if not rows:
+        return ok([])
+
+    other_ids = [r["friend_id"] if r["user_id"] == uid else r["user_id"] for r in rows]
+    profiles = _profile_map(other_ids, db)
+    return ok([_to_friend_dto(oid, profiles.get(oid, {})) for oid in other_ids])
 
 
 @router.get("/friends/pending")
@@ -115,9 +144,34 @@ def pending_requests(user=Depends(get_current_user), db: Client = Depends(get_db
     uid = user.id
     res = (
         db.table("user_friends")
-        .select("*")
+        .select("user_id")
         .eq("friend_id", uid)
         .eq("status", "PENDING")
         .execute()
     )
-    return ok(res.data or [])
+    rows = res.data or []
+    if not rows:
+        return ok([])
+
+    requester_ids = [r["user_id"] for r in rows]
+    profiles = _profile_map(requester_ids, db)
+    return ok([_to_friend_dto(rid, profiles.get(rid, {})) for rid in requester_ids])
+
+
+@router.get("/friends/sent")
+def sent_requests(user=Depends(get_current_user), db: Client = Depends(get_db)):
+    uid = user.id
+    res = (
+        db.table("user_friends")
+        .select("friend_id")
+        .eq("user_id", uid)
+        .eq("status", "PENDING")
+        .execute()
+    )
+    rows = res.data or []
+    if not rows:
+        return ok([])
+
+    target_ids = [r["friend_id"] for r in rows]
+    profiles = _profile_map(target_ids, db)
+    return ok([_to_friend_dto(tid, profiles.get(tid, {})) for tid in target_ids])
