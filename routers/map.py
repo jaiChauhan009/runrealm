@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_get, cache_set
 from database import get_db
 from schemas import ok
 from utils.geo_utils import haversine_km, within_radius
@@ -295,6 +296,14 @@ def live_territories(
     Used to render the conquest layer on the running map in real time.
     """
     uid = user.id
+    # Bucket to ~1 km precision so nearby GPS updates reuse the same cache entry
+    lat_b = round(lat, 2)
+    lon_b = round(lon, 2)
+    cache_key = f"live_terr:{uid}:{lat_b}:{lon_b}:{radiusKm}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     deg = radiusKm / 111.0
 
     terr_res = (
@@ -362,7 +371,7 @@ def live_territories(
             },
         })
 
-    return ok({
+    result = ok({
         "type": "FeatureCollection",
         "features": features,
         "meta": {
@@ -372,6 +381,8 @@ def live_territories(
             "contested": sum(1 for f in features if not f["properties"]["ownedByMe"] and not f["properties"]["unclaimed"]),
         },
     })
+    cache_set(cache_key, result, ttl_seconds=15)
+    return result
 
 
 @router.get("/territories/polygons")
@@ -396,6 +407,13 @@ def territory_polygons(
     Territories without boundary_geo_json are returned as Point-only.
     """
     uid = user.id
+    lat_b = round(lat, 2)
+    lon_b = round(lon, 2)
+    cache_key = f"polygons:{uid}:{lat_b}:{lon_b}:{radiusKm}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return JSONResponse(content=cached)
+
     deg = min(radiusKm, 50.0) / 111.0
 
     terr_res = (
@@ -492,7 +510,7 @@ def territory_polygons(
     # Return raw GeoJSON — the Android client uses bodyAsText() and feeds this
     # directly into MapLibre's GeoJsonSource.setGeoJson(), which requires a
     # plain FeatureCollection string, not the ok()-wrapped envelope.
-    return JSONResponse(content={
+    content = {
         "type": "FeatureCollection",
         "features": features,
         "meta": {
@@ -504,4 +522,6 @@ def territory_polygons(
             "centerLat": lat,
             "centerLon": lon,
         },
-    })
+    }
+    cache_set(cache_key, content, ttl_seconds=30)
+    return JSONResponse(content=content)

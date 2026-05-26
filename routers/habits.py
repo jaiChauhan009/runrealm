@@ -1,15 +1,18 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
-from cache import cache_invalidate
+from cache import cache_get, cache_invalidate, cache_set
 from database import get_db
 from schemas import HabitCreateRequest, HabitLogRequest, ok
 from utils import xp_calculator as xp
 
 router = APIRouter()
+_pool = ThreadPoolExecutor(max_workers=4)
 
 
 @router.get("")
@@ -87,21 +90,35 @@ def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: Client 
             "level": xp.level_from_xp(new_xp),
         }).eq("user_id", uid).execute()
 
-    # Invalidate dashboard cache so today's habit progress reflects immediately
+    # Invalidate caches so stats and dashboard reflect the new log immediately
     cache_invalidate(f"dashboard:{uid}")
+    cache_invalidate(f"habit_stats:{uid}")
 
     return ok(res.data[0])
 
 
 @router.get("/stats")
-def habit_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
+async def habit_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"habit_stats:{uid}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     today = date.today()
+    week_start = (today - timedelta(days=6)).isoformat()
+    month_start = (today - timedelta(days=29)).isoformat()
+    loop = asyncio.get_event_loop()
 
-    habits_res = db.table("habits").select("id").eq("user_id", uid).eq("is_active", True).execute()
-    habit_ids = [h["id"] for h in (habits_res.data or [])]
-    total_habits = len(habit_ids)
+    # Run all 4 independent queries in parallel
+    habits_res, logs_today, logs_week, logs_month = await asyncio.gather(
+        loop.run_in_executor(_pool, lambda: db.table("habits").select("id").eq("user_id", uid).eq("is_active", True).execute()),
+        loop.run_in_executor(_pool, lambda: db.table("habit_logs").select("habit_id").eq("user_id", uid).eq("log_date", today.isoformat()).eq("is_completed", True).execute()),
+        loop.run_in_executor(_pool, lambda: db.table("habit_logs").select("habit_id").eq("user_id", uid).gte("log_date", week_start).eq("is_completed", True).execute()),
+        loop.run_in_executor(_pool, lambda: db.table("habit_logs").select("habit_id").eq("user_id", uid).gte("log_date", month_start).eq("is_completed", True).execute()),
+    )
 
+    total_habits = len(habits_res.data or [])
     if total_habits == 0:
         empty = {"completedCount": 0, "totalCount": 0, "percentage": 0}
         return ok({"daily": empty, "weekly": empty, "monthly": empty, "overallScore": 0})
@@ -109,45 +126,25 @@ def habit_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
     def _pct(completed: int, total: int) -> float:
         return round((completed / total) * 100, 1) if total > 0 else 0.0
 
-    # Daily
-    logs_today = (
-        db.table("habit_logs").select("habit_id")
-        .eq("user_id", uid).eq("log_date", today.isoformat()).eq("is_completed", True)
-        .execute()
-    )
-    daily_done = len(logs_today.data or [])
-
-    # Weekly (last 7 days)
-    week_start = (today - timedelta(days=6)).isoformat()
-    logs_week = (
-        db.table("habit_logs").select("habit_id, log_date")
-        .eq("user_id", uid).gte("log_date", week_start).eq("is_completed", True)
-        .execute()
-    )
-    weekly_possible = total_habits * 7
-    weekly_done = len(logs_week.data or [])
-
-    # Monthly (last 30 days)
-    month_start = (today - timedelta(days=29)).isoformat()
-    logs_month = (
-        db.table("habit_logs").select("habit_id")
-        .eq("user_id", uid).gte("log_date", month_start).eq("is_completed", True)
-        .execute()
-    )
-    monthly_possible = total_habits * 30
+    daily_done   = len(logs_today.data or [])
+    weekly_done  = len(logs_week.data or [])
     monthly_done = len(logs_month.data or [])
+    weekly_possible  = total_habits * 7
+    monthly_possible = total_habits * 30
 
     daily_pct   = _pct(daily_done, total_habits)
     weekly_pct  = _pct(weekly_done, weekly_possible)
     monthly_pct = _pct(monthly_done, monthly_possible)
     overall     = round((daily_pct * 0.4 + weekly_pct * 0.35 + monthly_pct * 0.25), 1)
 
-    return ok({
+    result = ok({
         "daily":   {"completedCount": daily_done,   "totalCount": total_habits,    "percentage": daily_pct},
         "weekly":  {"completedCount": weekly_done,  "totalCount": weekly_possible,  "percentage": weekly_pct},
         "monthly": {"completedCount": monthly_done, "totalCount": monthly_possible, "percentage": monthly_pct},
         "overallScore": overall,
     })
+    cache_set(cache_key, result, ttl_seconds=300)
+    return result
 
 
 @router.get("/logs")

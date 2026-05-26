@@ -312,30 +312,41 @@ def claim_territory(
     territory_id = new_territory["id"]
 
     # 11. Supersede overlapping territories and update their owners' stats
-    rivals_captured = 0
+    # Pre-compute per-rival area loss so we can batch the profile READ (1 query instead of N).
+    rival_area_lost: dict[str, float] = {}
+    for t in overlapping:
+        prev_uid = t.get("captured_by")
+        if prev_uid and prev_uid != uid:
+            rival_area_lost[prev_uid] = rival_area_lost.get(prev_uid, 0) + (t.get("area_sq_km") or 0)
+
+    # Batch-fetch all rival profiles in a single query
+    rival_profile_map: dict[str, dict] = {}
+    if rival_area_lost:
+        rp_res = (
+            db.table("user_profiles")
+            .select("user_id, territory_owned_sq_km")
+            .in_("user_id", list(rival_area_lost.keys()))
+            .execute()
+        )
+        rival_profile_map = {p["user_id"]: p for p in (rp_res.data or [])}
+
+    rivals_captured = len(rival_area_lost)
+
+    # Update each overlapping territory (status + capture_count differ per row — must be individual)
     for t in overlapping:
         db.table("territories").update({
             "status": "SUPERSEDED",
             "capture_count": (t.get("capture_count") or 0) + 1,
         }).eq("id", t["id"]).execute()
 
-        prev_uid = t.get("captured_by")
-        if prev_uid and prev_uid != uid:
-            rivals_captured += 1
-            # Reduce previous owner's territory area
-            prev_profile = (
-                db.table("user_profiles")
-                .select("territory_owned_sq_km")
-                .eq("user_id", prev_uid)
-                .single()
-                .execute()
-                .data or {}
-            )
-            lost_area = t.get("area_sq_km") or 0
-            new_area = max(0.0, (prev_profile.get("territory_owned_sq_km") or 0) - lost_area)
-            db.table("user_profiles").update({
-                "territory_owned_sq_km": round(new_area, 4),
-            }).eq("user_id", prev_uid).execute()
+    # Update each rival's profile area (values differ per rival — must be individual)
+    for rival_uid, lost_area in rival_area_lost.items():
+        prev = rival_profile_map.get(rival_uid, {})
+        new_area = max(0.0, (prev.get("territory_owned_sq_km") or 0) - lost_area)
+        db.table("user_profiles").update({
+            "territory_owned_sq_km": round(new_area, 4),
+        }).eq("user_id", rival_uid).execute()
+        cache_invalidate(f"dashboard:{rival_uid}")
 
     # 12. Update claimant's profile stats
     my_profile = (

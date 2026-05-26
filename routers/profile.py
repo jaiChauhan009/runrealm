@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_get, cache_invalidate, cache_set
 from database import get_db
 from schemas import ProfileUpdateRequest, ok
 from utils import xp_calculator as xp
@@ -62,11 +63,17 @@ def _resolve_distance(profile: dict, uid: str, db: Client) -> float:
 @router.get("")
 def my_profile(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"profile:{uid}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
     res = db.table("user_profiles").select("*").eq("user_id", uid).single().execute()
     if not res.data:
         raise HTTPException(400, "Profile not found")
     p = res.data
-    return ok(_build_profile(p, _resolve_distance(p, uid, db)))
+    result = ok(_build_profile(p, _resolve_distance(p, uid, db)))
+    cache_set(cache_key, result, ttl_seconds=30)
+    return result
 
 
 @router.get("/{user_id}")
@@ -116,4 +123,5 @@ def update_profile(
     if not res.data:
         raise HTTPException(400, "Profile not found")
     p = res.data[0]
+    cache_invalidate(f"profile:{uid}")
     return ok(_build_profile(p, _resolve_distance(p, uid, db)))

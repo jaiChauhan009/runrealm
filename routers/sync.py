@@ -94,19 +94,28 @@ def sync_batch(body: SyncBatchRequest, user=Depends(get_current_user), db: Clien
     synced = 0
     failed = 0
 
+    if not body.items:
+        return ok({"totalReceived": 0, "totalSynced": 0, "totalFailed": 0, "results": []})
+
+    # Pre-fetch all idempotency records in one query (was N per-item queries)
+    local_ids = [item.localId for item in body.items]
+    existing_res = (
+        db.table("sync_queue")
+        .select("local_id,server_id,status")
+        .eq("user_id", uid)
+        .in_("local_id", local_ids)
+        .execute()
+    )
+    already_synced = {
+        r["local_id"]: r for r in (existing_res.data or [])
+        if r.get("status") == "SYNCED"
+    }
+
     for item in body.items:
-        # Idempotency — already in queue as SYNCED?
-        existing = (
-            db.table("sync_queue")
-            .select("server_id, status")
-            .eq("user_id", uid)
-            .eq("local_id", item.localId)
-            .execute()
-        )
-        if existing.data and existing.data[0].get("status") == "SYNCED":
+        if item.localId in already_synced:
             results.append({
                 "localId": item.localId,
-                "serverId": existing.data[0]["server_id"],
+                "serverId": already_synced[item.localId]["server_id"],
                 "success": True,
                 "error": None,
             })

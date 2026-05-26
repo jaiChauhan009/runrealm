@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_get, cache_invalidate, cache_set
 from database import get_db
 from schemas import TodoCreateRequest, TodoStatusRequest, TodoUpdateRequest, ok
 
@@ -17,6 +18,7 @@ def _owned_update(todo_id: str, uid: str, update: dict, db: Client) -> dict:
     res = db.table("daily_todos").update(update).eq("id", todo_id).eq("user_id", uid).execute()
     if not res.data:
         raise HTTPException(404, "Todo not found")
+    cache_invalidate(f"todo_stats:{uid}")
     return res.data[0]
 
 
@@ -55,6 +57,7 @@ def create_todo(body: TodoCreateRequest, user=Depends(get_current_user), db: Cli
         "scheduled_at": body.scheduledAt.isoformat() if body.scheduledAt else None,
     }
     res = db.table("daily_todos").insert(row).execute()
+    cache_invalidate(f"todo_stats:{uid}")
     return ok(res.data[0])
 
 
@@ -132,12 +135,17 @@ def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_
 def delete_todo(todo_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
     db.table("daily_todos").delete().eq("id", todo_id).eq("user_id", uid).execute()
+    cache_invalidate(f"todo_stats:{uid}")
     return ok(None, "Todo deleted")
 
 
 @router.get("/stats")
 def todo_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"todo_stats:{uid}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
     today = date.today()
     month_start = (today - timedelta(days=29)).isoformat()
     today_str = today.isoformat()
@@ -178,9 +186,11 @@ def todo_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
     monthly_pct = _pct(m_done, m_total)
     overall     = round(daily_pct * 0.4 + weekly_pct * 0.35 + monthly_pct * 0.25, 1)
 
-    return ok({
+    result = ok({
         "daily":   {"completedCount": d_done, "totalCount": d_total, "percentage": daily_pct},
         "weekly":  {"completedCount": w_done, "totalCount": w_total, "percentage": weekly_pct},
         "monthly": {"completedCount": m_done, "totalCount": m_total, "percentage": monthly_pct},
         "overallScore": overall,
     })
+    cache_set(cache_key, result, ttl_seconds=600)
+    return result

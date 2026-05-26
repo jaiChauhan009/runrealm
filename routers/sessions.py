@@ -1,6 +1,6 @@
 from datetime import date, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
@@ -51,19 +51,6 @@ def _update_streak(db: Client, uid: str, activity_date: date) -> int:
     return new_streak
 
 
-def _award_xp(db: Client, uid: str, amount: int, txn_type: str, ref_id: str, desc: str):
-    db.table("xp_transactions").insert({
-        "user_id": uid,
-        "amount": amount,
-        "transaction_type": txn_type,
-        "reference_id": ref_id,
-        "description": desc,
-    }).execute()
-    profile = db.table("user_profiles").select("xp_points").eq("user_id", uid).single().execute().data or {}
-    new_xp = (profile.get("xp_points") or 0) + amount
-    db.table("user_profiles").update({"xp_points": new_xp, "level": xp.level_from_xp(new_xp)}).eq("user_id", uid).execute()
-
-
 @router.post("/start")
 def start_session(body: StartSessionRequest, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
@@ -90,6 +77,7 @@ def start_session(body: StartSessionRequest, user=Depends(get_current_user), db:
 def end_session(
     session_id: str,
     body: EndSessionRequest,
+    background_tasks: BackgroundTasks,
     user=Depends(get_current_user),
     db: Client = Depends(get_db),
 ):
@@ -128,36 +116,47 @@ def end_session(
     }
     res = db.table("run_sessions").update(update).eq("id", session_id).execute()
 
-    _award_xp(db, uid, xp_earned, "RUN_COMPLETE", session_id,
-              f"Completed {body.distanceKm:.2f} km run")
-
-    # Update profile totals (single round trip)
+    # Single profile read covers both XP award and totals update (was 2 separate reads)
     profile = (
         db.table("user_profiles")
-        .select("total_runs, total_calories, total_distance_km")
+        .select("xp_points, total_runs, total_calories, total_distance_km")
         .eq("user_id", uid)
         .single()
         .execute()
         .data or {}
     )
+    new_xp = (profile.get("xp_points") or 0) + xp_earned
+    db.table("xp_transactions").insert({
+        "user_id": uid,
+        "amount": xp_earned,
+        "transaction_type": "RUN_COMPLETE",
+        "reference_id": session_id,
+        "description": f"Completed {body.distanceKm:.2f} km run",
+    }).execute()
     db.table("user_profiles").update({
+        "xp_points": new_xp,
+        "level": xp.level_from_xp(new_xp),
         "total_runs": (profile.get("total_runs") or 0) + 1,
         "total_calories": (profile.get("total_calories") or 0) + (body.caloriesBurned or 0),
         "total_distance_km": round((profile.get("total_distance_km") or 0) + body.distanceKm, 3),
     }).eq("user_id", uid).execute()
 
-    # Activity feed
-    db.table("activity_feed").insert({
-        "user_id": uid,
-        "activity_type": "RUN_COMPLETED",
-        "reference_id": session_id,
-        "message": f"Completed a {body.distanceKm:.2f} km run",
-        "metadata_json": f'{{"distanceKm":{body.distanceKm},"durationSec":{duration},"calories":{body.caloriesBurned or 0}}}',
-        "is_public": True,
-    }).execute()
+    # Activity feed off the critical path — doesn't block response
+    dist_km = body.distanceKm
+    calories = body.caloriesBurned or 0
+    background_tasks.add_task(
+        lambda: db.table("activity_feed").insert({
+            "user_id": uid,
+            "activity_type": "RUN_COMPLETED",
+            "reference_id": session_id,
+            "message": f"Completed a {dist_km:.2f} km run",
+            "metadata_json": f'{{"distanceKm":{dist_km},"durationSec":{duration},"calories":{calories}}}',
+            "is_public": True,
+        }).execute()
+    )
 
-    # Invalidate dashboard cache so next fetch reflects new XP, streak, and stats
     cache_invalidate(f"dashboard:{uid}")
+    cache_invalidate(f"profile:{uid}")
 
     return ok(res.data[0])
 
@@ -206,9 +205,16 @@ def list_sessions(
     start = page * size
     end = start + size - 1
 
+    # Exclude route_geo_json — can be hundreds of KB per session and isn't
+    # needed in the list view.
     res = (
         db.table("run_sessions")
-        .select("*", count="exact")
+        .select(
+            "id,user_id,local_id,activity_type,start_time,end_time,status,"
+            "distance_km,avg_pace_min_per_km,max_speed_kmh,calories_burned,"
+            "elevation_gain_m,duration_seconds,xp_earned,synced",
+            count="exact",
+        )
         .eq("user_id", uid)
         .order("start_time", desc=True)
         .range(start, end)

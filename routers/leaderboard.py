@@ -50,6 +50,7 @@ def _resolve_scope(
         db.table("user_profiles")
         .select("user_id")
         .eq("city", city)
+        .limit(500)
         .execute()
     )
     return [p["user_id"] for p in (matched.data or [])]
@@ -100,48 +101,42 @@ def leaderboard(
             for i, r in enumerate(res.data or [])
         ]
 
-    else:  # distance
-        query = (
-            db.table("run_sessions")
-            .select("user_id, distance_km")
-            .eq("status", "COMPLETED")
-        )
-        if scope_ids is not None:
-            if not scope_ids:
-                return ok([])
-            query = query.in_("user_id", scope_ids)
-        res = query.execute()
+    else:  # distance — DB-side SUM via RPC (see migrations/add_distance_leaderboard_fn.sql)
+        if scope_ids is not None and not scope_ids:
+            return ok([])
 
-        totals: dict[str, float] = {}
-        for row in (res.data or []):
-            uid = row["user_id"]
-            totals[uid] = totals.get(uid, 0) + (row.get("distance_km") or 0)
+        params: dict = {"scope_ids": scope_ids}  # None → no filter (global)
+        res = db.rpc("get_distance_leaderboard", params).execute()
 
-        if totals:
+        rows = (res.data or [])[:top]
+
+        if rows:
+            top_uids = [r["user_id"] for r in rows]
             profiles = (
                 db.table("user_profiles")
                 .select("user_id, username, display_name, avatar_url, level")
-                .in_("user_id", list(totals.keys()))
+                .in_("user_id", top_uids)
                 .execute()
             )
             profile_map = {p["user_id"]: p for p in (profiles.data or [])}
         else:
             profile_map = {}
 
-        sorted_entries = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:top]
         entries = [
             {
                 "rank": i + 1,
-                "userId": uid,
-                "username": profile_map.get(uid, {}).get("username", "Unknown"),
-                "displayName": profile_map.get(uid, {}).get("display_name"),
-                "avatarUrl": profile_map.get(uid, {}).get("avatar_url"),
-                "level": profile_map.get(uid, {}).get("level", 1),
-                "score": round(dist, 2),
+                "userId": r["user_id"],
+                "username": profile_map.get(r["user_id"], {}).get("username", "Unknown"),
+                "displayName": profile_map.get(r["user_id"], {}).get("display_name"),
+                "avatarUrl": profile_map.get(r["user_id"], {}).get("avatar_url"),
+                "level": profile_map.get(r["user_id"], {}).get("level", 1),
+                "score": round(r.get("total_km") or 0, 2),
             }
-            for i, (uid, dist) in enumerate(sorted_entries)
+            for i, r in enumerate(rows)
         ]
 
     result = ok(entries)
-    cache_set(cache_key, result, ttl_seconds=60)
+    # XP changes on every session; distance changes less often — cache longer
+    ttl = 120 if type == "xp" else 300
+    cache_set(cache_key, result, ttl_seconds=ttl)
     return result
