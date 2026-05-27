@@ -79,7 +79,7 @@ def _pace_color(avg_pace: float | None) -> str:
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/route/{session_id}")
-def get_route(session_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
+async def get_route(session_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
     """
     Returns a GeoJSON FeatureCollection ready to hand to Google Maps / Mapbox:
       • Feature 1 — LineString of the full GPS path, styled by pace
@@ -95,22 +95,26 @@ def get_route(session_id: str, user=Depends(get_current_user), db: Client = Depe
         if cached.get("_uid") == uid:
             return ok(cached["payload"])
 
-    # Fetch session
-    sess_res = db.table("run_sessions").select("*").eq("id", session_id).execute()
+    loop = asyncio.get_running_loop()
+
+    # Fetch session + GPS points in parallel — ownership check happens after both return
+    sess_res, pts_res = await asyncio.gather(
+        loop.run_in_executor(_pool, lambda: get_db().table("run_sessions").select("*").eq("id", session_id).execute()),
+        loop.run_in_executor(_pool, lambda: (
+            get_db().table("route_points")
+            .select("latitude,longitude,altitude,speed_kmh,recorded_at,sequence_number")
+            .eq("session_id", session_id)
+            .order("sequence_number")
+            .execute()
+        )),
+    )
+
     if not sess_res.data:
         raise HTTPException(400, "Session not found")
     session = sess_res.data[0]
     if session["user_id"] != uid:
         raise HTTPException(403, "Not your session")
 
-    # Fetch ordered GPS points
-    pts_res = (
-        db.table("route_points")
-        .select("latitude,longitude,altitude,speed_kmh,recorded_at,sequence_number")
-        .eq("session_id", session_id)
-        .order("sequence_number")
-        .execute()
-    )
     points = pts_res.data or []
 
     features = []
