@@ -206,7 +206,7 @@ async def get_league(
     db: Client = Depends(get_db),
 ):
     uid = user.id
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     league = _get_league_or_404(league_id, db)
 
     # ── Deadline check ─────────────────────────────────────────────────────────
@@ -227,13 +227,13 @@ async def get_league(
             _notify_members(member_ids, "Vote Failed", f"Vote to delete '{league['name']}' failed — league continues", db)
             league["vote_deadline"] = None
 
-    # ── Members + delete-votes in parallel ────────────────────────────────────
+    # ── Members + delete-votes in parallel — each lambda gets its own thread-local client ──
     members_res, votes_res = await asyncio.gather(
         loop.run_in_executor(_pool, lambda: (
-            db.table("league_members").select("*").eq("league_id", league_id).order("joined_at").execute()
+            get_db().table("league_members").select("*").eq("league_id", league_id).order("joined_at").execute()
         )),
         loop.run_in_executor(_pool, lambda: (
-            db.table("league_delete_votes").select("user_id").eq("league_id", league_id).execute()
+            get_db().table("league_delete_votes").select("user_id").eq("league_id", league_id).execute()
         )),
     )
 

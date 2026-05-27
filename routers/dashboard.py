@@ -3,7 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends
-from supabase import Client
 
 from auth import get_current_user
 from cache import cache_get, cache_set
@@ -18,7 +17,7 @@ _pool = ThreadPoolExecutor(max_workers=6)
 
 
 @router.get("")
-async def dashboard(user=Depends(get_current_user), db: Client = Depends(get_db)):
+async def dashboard(user=Depends(get_current_user)):
     uid = user.id
 
     # Serve cached response if still fresh (30-second TTL per user)
@@ -27,7 +26,9 @@ async def dashboard(user=Depends(get_current_user), db: Client = Depends(get_db)
     if cached:
         return cached
 
-    loop = asyncio.get_event_loop()
+    # Each lambda calls get_db() to get its own thread-local httpx client,
+    # preventing HTTP/2 stream contention when threads share one connection.
+    loop = asyncio.get_running_loop()
     today = date.today().isoformat()
     week_start = (date.today() - timedelta(days=6)).isoformat()
 
@@ -35,16 +36,16 @@ async def dashboard(user=Depends(get_current_user), db: Client = Depends(get_db)
     profile, streak, sessions, territory_count, habits, today_logs = await asyncio.gather(
         loop.run_in_executor(
             _pool,
-            lambda: db.table("user_profiles").select("*").eq("user_id", uid).single().execute().data or {},
+            lambda: get_db().table("user_profiles").select("*").eq("user_id", uid).single().execute().data or {},
         ),
         loop.run_in_executor(
             _pool,
-            lambda: db.table("streaks").select("*").eq("user_id", uid).single().execute().data or {},
+            lambda: get_db().table("streaks").select("*").eq("user_id", uid).single().execute().data or {},
         ),
         loop.run_in_executor(
             _pool,
             lambda: (
-                db.table("run_sessions")
+                get_db().table("run_sessions")
                 .select("distance_km, calories_burned, start_time, activity_type, id, duration_seconds")
                 .eq("user_id", uid)
                 .eq("status", "COMPLETED")
@@ -56,15 +57,15 @@ async def dashboard(user=Depends(get_current_user), db: Client = Depends(get_db)
         ),
         loop.run_in_executor(
             _pool,
-            lambda: db.table("territories").select("id", count="exact").eq("captured_by", uid).eq("status", "ACTIVE").execute().count or 0,
+            lambda: get_db().table("territories").select("id", count="exact").eq("captured_by", uid).eq("status", "ACTIVE").execute().count or 0,
         ),
         loop.run_in_executor(
             _pool,
-            lambda: db.table("habits").select("*").eq("user_id", uid).eq("is_active", True).execute().data or [],
+            lambda: get_db().table("habits").select("*").eq("user_id", uid).eq("is_active", True).execute().data or [],
         ),
         loop.run_in_executor(
             _pool,
-            lambda: db.table("habit_logs").select("*").eq("user_id", uid).eq("log_date", today).execute().data or [],
+            lambda: get_db().table("habit_logs").select("*").eq("user_id", uid).eq("log_date", today).execute().data or [],
         ),
     )
 

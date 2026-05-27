@@ -65,13 +65,15 @@ async def end_session(
     db: Client = Depends(get_db),
 ):
     uid = user.id
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Round 1 — read session + streak + profile in parallel (3 → 1 wall-clock round)
+    # Each lambda calls get_db() so it gets its own thread-local httpx client,
+    # avoiding HTTP/2 stream contention when threads share a single client.
     sess_res, streak_res, profile_res = await asyncio.gather(
-        loop.run_in_executor(_pool, lambda: db.table("run_sessions").select("*").eq("id", session_id).eq("user_id", uid).execute()),
-        loop.run_in_executor(_pool, lambda: db.table("streaks").select("*").eq("user_id", uid).execute()),
-        loop.run_in_executor(_pool, lambda: db.table("user_profiles").select("xp_points,total_runs,total_calories,total_distance_km").eq("user_id", uid).single().execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("run_sessions").select("*").eq("id", session_id).eq("user_id", uid).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("streaks").select("*").eq("user_id", uid).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("user_profiles").select("xp_points,total_runs,total_calories,total_distance_km").eq("user_id", uid).single().execute()),
     )
 
     if not sess_res.data:
@@ -131,19 +133,20 @@ async def end_session(
         "total_distance_km": round((profile.get("total_distance_km") or 0) + dist_km, 3),
     }
 
-    # Round 2 — all writes in one thread (avoids httpx connection contention under concurrency)
+    # Round 2 — all writes in one thread with its own DB client
     def _do_all_writes():
-        sess_res = db.table("run_sessions").update(session_update).eq("id", session_id).execute()
+        _db = get_db()
+        sess_res = _db.table("run_sessions").update(session_update).eq("id", session_id).execute()
         if streak_row.get("id"):
-            db.table("streaks").update(streak_update).eq("id", streak_row["id"]).execute()
+            _db.table("streaks").update(streak_update).eq("id", streak_row["id"]).execute()
         else:
-            db.table("streaks").insert({"user_id": uid, **streak_update}).execute()
-        db.table("xp_transactions").insert({
+            _db.table("streaks").insert({"user_id": uid, **streak_update}).execute()
+        _db.table("xp_transactions").insert({
             "user_id": uid, "amount": xp_earned,
             "transaction_type": "RUN_COMPLETE", "reference_id": session_id,
             "description": f"Completed {dist_km:.2f} km run",
         }).execute()
-        db.table("user_profiles").update(profile_update).eq("user_id", uid).execute()
+        _db.table("user_profiles").update(profile_update).eq("user_id", uid).execute()
         return sess_res
 
     res = await loop.run_in_executor(_pool, _do_all_writes)

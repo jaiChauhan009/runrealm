@@ -243,12 +243,13 @@ async def nearby_users(
     radius = min(radiusKm, 50.0)
     deg    = radius / 111.0
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    loop   = asyncio.get_event_loop()
+    loop   = asyncio.get_running_loop()
 
-    # Fire candidates + friends queries in parallel (both independent)
+    # Fire candidates + friends queries in parallel — each lambda calls get_db()
+    # so each pool thread uses its own thread-local httpx client (avoids HTTP/2 contention).
     candidates_res, friends_res = await asyncio.gather(
         loop.run_in_executor(_pool, lambda: (
-            db.table("user_profiles")
+            get_db().table("user_profiles")
             .select("user_id,username,display_name,avatar_url,level,xp_points,last_lat,last_lon,last_location_at")
             .gte("last_lat", lat - deg).lte("last_lat", lat + deg)
             .gte("last_lon", lon - deg).lte("last_lon", lon + deg)
@@ -258,7 +259,7 @@ async def nearby_users(
             .execute()
         )),
         loop.run_in_executor(_pool, lambda: (
-            db.table("user_friends")
+            get_db().table("user_friends")
             .select("friend_id,user_id")
             .or_(f"user_id.eq.{uid},friend_id.eq.{uid}")
             .execute()

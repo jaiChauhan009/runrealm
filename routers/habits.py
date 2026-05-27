@@ -51,14 +51,15 @@ def create_habit(body: HabitCreateRequest, user=Depends(get_current_user), db: C
 @router.post("/log")
 async def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
-    # Fetch habit + streak + existing log in parallel (3 independent queries)
+    # Fetch habit + streak + existing log in parallel — each lambda calls get_db()
+    # so each pool thread uses its own thread-local httpx client (no HTTP/2 contention).
     habit_res, streak_res, existing_res = await asyncio.gather(
-        loop.run_in_executor(_pool, lambda: db.table("habits").select("*").eq("id", body.habitId).eq("user_id", uid).execute()),
-        loop.run_in_executor(_pool, lambda: db.table("streaks").select("current_streak").eq("user_id", uid).single().execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("habits").select("*").eq("id", body.habitId).eq("user_id", uid).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("streaks").select("current_streak").eq("user_id", uid).single().execute()),
         loop.run_in_executor(_pool, lambda: (
-            db.table("habit_logs").select("id")
+            get_db().table("habit_logs").select("id")
             .eq("habit_id", body.habitId)
             .eq("log_date", body.logDate.isoformat())
             .execute()
@@ -106,7 +107,7 @@ async def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: C
 
 
 @router.get("/stats")
-async def habit_stats(user=Depends(get_current_user), db: Client = Depends(get_db)):
+async def habit_stats(user=Depends(get_current_user)):
     uid = user.id
     cache_key = f"habit_stats:{uid}"
     cached = cache_get(cache_key)
@@ -116,14 +117,14 @@ async def habit_stats(user=Depends(get_current_user), db: Client = Depends(get_d
     today = date.today()
     week_start = (today - timedelta(days=6)).isoformat()
     month_start = (today - timedelta(days=29)).isoformat()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
-    # Run all 4 independent queries in parallel
+    # Run all 4 independent queries in parallel — each lambda gets its own thread-local client
     habits_res, logs_today, logs_week, logs_month = await asyncio.gather(
-        loop.run_in_executor(_pool, lambda: db.table("habits").select("id").eq("user_id", uid).eq("is_active", True).execute()),
-        loop.run_in_executor(_pool, lambda: db.table("habit_logs").select("habit_id").eq("user_id", uid).eq("log_date", today.isoformat()).eq("is_completed", True).execute()),
-        loop.run_in_executor(_pool, lambda: db.table("habit_logs").select("habit_id").eq("user_id", uid).gte("log_date", week_start).eq("is_completed", True).execute()),
-        loop.run_in_executor(_pool, lambda: db.table("habit_logs").select("habit_id").eq("user_id", uid).gte("log_date", month_start).eq("is_completed", True).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("habits").select("id").eq("user_id", uid).eq("is_active", True).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("habit_logs").select("habit_id").eq("user_id", uid).eq("log_date", today.isoformat()).eq("is_completed", True).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("habit_logs").select("habit_id").eq("user_id", uid).gte("log_date", week_start).eq("is_completed", True).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("habit_logs").select("habit_id").eq("user_id", uid).gte("log_date", month_start).eq("is_completed", True).execute()),
     )
 
     total_habits = len(habits_res.data or [])
