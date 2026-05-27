@@ -37,7 +37,7 @@ except ImportError:
     _SHAPELY = False
 
 from auth import get_current_user
-from cache import cache_invalidate, cache_invalidate_prefix
+from cache import cache_get, cache_invalidate, cache_invalidate_prefix, cache_set
 from database import get_db
 from schemas import TerritoryClaimRequest, ok
 from utils import xp_calculator as xp

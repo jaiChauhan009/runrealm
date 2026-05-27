@@ -131,23 +131,22 @@ async def end_session(
         "total_distance_km": round((profile.get("total_distance_km") or 0) + dist_km, 3),
     }
 
-    # Round 2 — all writes in parallel (4 → 1 wall-clock round)
-    def _update_streak_table():
+    # Round 2 — all writes in one thread (avoids httpx connection contention under concurrency)
+    def _do_all_writes():
+        sess_res = db.table("run_sessions").update(session_update).eq("id", session_id).execute()
         if streak_row.get("id"):
             db.table("streaks").update(streak_update).eq("id", streak_row["id"]).execute()
         else:
             db.table("streaks").insert({"user_id": uid, **streak_update}).execute()
-
-    res, *_ = await asyncio.gather(
-        loop.run_in_executor(_pool, lambda: db.table("run_sessions").update(session_update).eq("id", session_id).execute()),
-        loop.run_in_executor(_pool, _update_streak_table),
-        loop.run_in_executor(_pool, lambda: db.table("xp_transactions").insert({
+        db.table("xp_transactions").insert({
             "user_id": uid, "amount": xp_earned,
             "transaction_type": "RUN_COMPLETE", "reference_id": session_id,
             "description": f"Completed {dist_km:.2f} km run",
-        }).execute()),
-        loop.run_in_executor(_pool, lambda: db.table("user_profiles").update(profile_update).eq("user_id", uid).execute()),
-    )
+        }).execute()
+        db.table("user_profiles").update(profile_update).eq("user_id", uid).execute()
+        return sess_res
+
+    res = await loop.run_in_executor(_pool, _do_all_writes)
 
     background_tasks.add_task(
         lambda: db.table("activity_feed").insert({
