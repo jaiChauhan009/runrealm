@@ -1,3 +1,5 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from math import ceil
 from typing import Optional
@@ -8,6 +10,8 @@ from supabase import Client
 from auth import get_current_user
 from database import get_db
 from schemas import LeagueCreateRequest, ok
+
+_pool = ThreadPoolExecutor(max_workers=4)
 
 router = APIRouter()
 
@@ -196,23 +200,23 @@ def create_league(
 
 
 @router.get("/{league_id}")
-def get_league(
+async def get_league(
     league_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_db),
 ):
     uid = user.id
+    loop = asyncio.get_event_loop()
     league = _get_league_or_404(league_id, db)
 
-    # ── Deadline check ────────────────────────────────────────────────────────
+    # ── Deadline check ─────────────────────────────────────────────────────────
     deadline = _parse_dt(league.get("vote_deadline"))
     if deadline and datetime.now(timezone.utc) > deadline:
         members_res = db.table("league_members").select("user_id").eq("league_id", league_id).execute()
         member_ids = [m["user_id"] for m in (members_res.data or [])]
-        member_count_now = len(member_ids)
-        votes_res = db.table("league_delete_votes").select("user_id").eq("league_id", league_id).execute()
+        votes_res  = db.table("league_delete_votes").select("user_id").eq("league_id", league_id).execute()
         vote_count = len(votes_res.data or [])
-        needed = ceil(member_count_now / 2) if member_count_now else 1
+        needed     = ceil(len(member_ids) / 2) if member_ids else 1
 
         if vote_count >= needed:
             db.table("leagues").delete().eq("id", league_id).execute()
@@ -221,19 +225,26 @@ def get_league(
         else:
             db.table("leagues").update({"vote_deadline": None}).eq("id", league_id).execute()
             _notify_members(member_ids, "Vote Failed", f"Vote to delete '{league['name']}' failed — league continues", db)
-            league["vote_deadline"] = None  # reflect reset in this response
+            league["vote_deadline"] = None
 
-    # ── Members ───────────────────────────────────────────────────────────────
-    members_res = (
-        db.table("league_members")
-        .select("*")
-        .eq("league_id", league_id)
-        .order("joined_at")
-        .execute()
+    # ── Members + delete-votes in parallel ────────────────────────────────────
+    members_res, votes_res = await asyncio.gather(
+        loop.run_in_executor(_pool, lambda: (
+            db.table("league_members").select("*").eq("league_id", league_id).order("joined_at").execute()
+        )),
+        loop.run_in_executor(_pool, lambda: (
+            db.table("league_delete_votes").select("user_id").eq("league_id", league_id).execute()
+        )),
     )
-    members = _enrich_members(members_res.data or [], db)
+
+    members      = _enrich_members(members_res.data or [], db)
     member_count = len(members)
-    my_role = next((m["role"] for m in members if m["userId"] == uid), None)
+    my_role      = next((m["role"] for m in members if m["userId"] == uid), None)
+
+    votes_data         = votes_res.data or []
+    delete_votes       = len(votes_data)
+    delete_votes_needed = ceil(member_count / 2) if member_count else 1
+    my_vote_for_delete  = any(v["user_id"] == uid for v in votes_data)
 
     # ── Pending join requests — visible to admins only ────────────────────────
     pending_requests = []
@@ -265,18 +276,6 @@ def get_league(
                     "avatarUrl": p.get("avatar_url"),
                     "level": p.get("level", 1),
                 })
-
-    # ── Delete votes ──────────────────────────────────────────────────────────
-    votes_res = (
-        db.table("league_delete_votes")
-        .select("user_id")
-        .eq("league_id", league_id)
-        .execute()
-    )
-    votes_data = votes_res.data or []
-    delete_votes = len(votes_data)
-    delete_votes_needed = ceil(member_count / 2) if member_count else 1
-    my_vote_for_delete = any(v["user_id"] == uid for v in votes_data)
 
     return ok({
         "league": _league_summary(league, member_count, my_role),
@@ -369,9 +368,21 @@ def remove_member(
     user=Depends(get_current_user),
     db: Client = Depends(get_db),
 ):
-    _require_admin(league_id, user.id, db)
+    uid = user.id
+    # Fetch both the admin's and target's roles in one IN query
+    roles_res = (
+        db.table("league_members")
+        .select("user_id,role")
+        .eq("league_id", league_id)
+        .in_("user_id", [uid, user_id])
+        .execute()
+    )
+    role_map = {r["user_id"]: r["role"] for r in (roles_res.data or [])}
+    my_role     = role_map.get(uid)
+    target_role = role_map.get(user_id)
 
-    target_role = _get_my_role(league_id, user_id, db)
+    if not my_role or my_role not in ("CREATOR", "LEADER"):
+        raise HTTPException(403, "Admin access required")
     if not target_role:
         raise HTTPException(404, "Member not found")
     if target_role == "CREATOR":
@@ -389,11 +400,20 @@ def promote_member(
     db: Client = Depends(get_db),
 ):
     uid = user.id
-    my_role = _get_my_role(league_id, uid, db)
+    # Fetch both roles in one query
+    roles_res = (
+        db.table("league_members")
+        .select("user_id,role")
+        .eq("league_id", league_id)
+        .in_("user_id", [uid, user_id])
+        .execute()
+    )
+    role_map    = {r["user_id"]: r["role"] for r in (roles_res.data or [])}
+    my_role     = role_map.get(uid)
+    target_role = role_map.get(user_id)
+
     if my_role != "CREATOR":
         raise HTTPException(403, "Only the creator can promote members")
-
-    target_role = _get_my_role(league_id, user_id, db)
     if not target_role:
         raise HTTPException(404, "Member not found")
     if target_role == "CREATOR":

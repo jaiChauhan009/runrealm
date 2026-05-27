@@ -10,8 +10,10 @@ Map router — four concerns:
                                                       CircleLayer on the map
 """
 
+import asyncio
 import json
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -19,10 +21,12 @@ from pydantic import BaseModel
 from supabase import Client
 
 from auth import get_current_user
-from cache import cache_get, cache_set
+from cache import cache_get, cache_invalidate, cache_set
 from database import get_db
 from schemas import ok
 from utils.geo_utils import haversine_km, within_radius
+
+_pool = ThreadPoolExecutor(max_workers=4)
 
 router = APIRouter()
 
@@ -84,6 +88,12 @@ def get_route(session_id: str, user=Depends(get_current_user), db: Client = Depe
       • Features 4…N — Territory polygons inside the route bounding box
     """
     uid = user.id
+    cache_key = f"route:{session_id}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        # Ownership already verified when first cached; re-verify uid match
+        if cached.get("_uid") == uid:
+            return ok(cached["payload"])
 
     # Fetch session
     sess_res = db.table("run_sessions").select("*").eq("id", session_id).execute()
@@ -182,7 +192,7 @@ def get_route(session_id: str, user=Depends(get_current_user), db: Client = Depe
                 },
             })
 
-    return ok({
+    payload = {
         "type": "FeatureCollection",
         "features": features,
         "meta": {
@@ -193,7 +203,11 @@ def get_route(session_id: str, user=Depends(get_current_user), db: Client = Depe
             "status": session.get("status"),
             "xpEarned": session.get("xp_earned", 0),
         },
-    })
+    }
+    # Cache completed routes indefinitely (route data never changes after COMPLETED)
+    if session.get("status") == "COMPLETED":
+        cache_set(cache_key, {"_uid": uid, "payload": payload}, ttl_seconds=3600)
+    return ok(payload)
 
 
 @router.post("/location")
@@ -213,7 +227,7 @@ def update_location(
 
 
 @router.get("/nearby-users")
-def nearby_users(
+async def nearby_users(
     lat: float,
     lon: float,
     radiusKm: float = 5.0,
@@ -225,42 +239,39 @@ def nearby_users(
     Excludes the calling user and already-accepted friends.
     Returns list sorted by distance, ready for 'People Near You' friend suggestions.
     """
-    uid = user.id
-    radius = min(radiusKm, 50.0)   # cap at 50 km
-    deg = radius / 111.0
-
-    # Only show users whose location was updated in the last 2 hours — stale positions
-    # from days/weeks ago are misleading and not useful for "people near you".
-    from datetime import timedelta
+    uid    = user.id
+    radius = min(radiusKm, 50.0)
+    deg    = radius / 111.0
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    loop   = asyncio.get_event_loop()
 
-    # Bounding-box pre-filter from DB
-    res = (
-        db.table("user_profiles")
-        .select("user_id,username,display_name,avatar_url,level,xp_points,last_lat,last_lon,last_location_at,is_public")
-        .gte("last_lat", lat - deg).lte("last_lat", lat + deg)
-        .gte("last_lon", lon - deg).lte("last_lon", lon + deg)
-        .neq("user_id", uid)
-        .eq("is_public", True)
-        .gte("last_location_at", cutoff)
-        .execute()
+    # Fire candidates + friends queries in parallel (both independent)
+    candidates_res, friends_res = await asyncio.gather(
+        loop.run_in_executor(_pool, lambda: (
+            db.table("user_profiles")
+            .select("user_id,username,display_name,avatar_url,level,xp_points,last_lat,last_lon,last_location_at")
+            .gte("last_lat", lat - deg).lte("last_lat", lat + deg)
+            .gte("last_lon", lon - deg).lte("last_lon", lon + deg)
+            .neq("user_id", uid)
+            .eq("is_public", True)
+            .gte("last_location_at", cutoff)
+            .execute()
+        )),
+        loop.run_in_executor(_pool, lambda: (
+            db.table("user_friends")
+            .select("friend_id,user_id")
+            .or_(f"user_id.eq.{uid},friend_id.eq.{uid}")
+            .execute()
+        )),
     )
-    candidates = res.data or []
 
-    # Already friends
-    friends_res = (
-        db.table("user_friends")
-        .select("friend_id,user_id")
-        .or_(f"user_id.eq.{uid},friend_id.eq.{uid}")
-        .execute()
-    )
-    friend_ids = set()
-    for f in (friends_res.data or []):
-        friend_ids.add(f["friend_id"] if f["user_id"] == uid else f["user_id"])
+    friend_ids = {
+        f["friend_id"] if f["user_id"] == uid else f["user_id"]
+        for f in (friends_res.data or [])
+    }
 
-    # Precise Haversine filter
     nearby = []
-    for p in candidates:
+    for p in (candidates_res.data or []):
         if p["user_id"] in friend_ids:
             continue
         if not p.get("last_lat") or not p.get("last_lon"):
@@ -268,25 +279,24 @@ def nearby_users(
         dist = haversine_km(lat, lon, p["last_lat"], p["last_lon"])
         if dist <= radius:
             nearby.append({
-                "userId": p["user_id"],
-                "username": p["username"],
+                "userId":      p["user_id"],
+                "username":    p["username"],
                 "displayName": p.get("display_name"),
-                "avatarUrl": p.get("avatar_url"),
-                "level": p.get("level", 1),
-                "xpPoints": p.get("xp_points", 0),
-                "distanceKm": round(dist, 2),
-                "lastSeenAt": p.get("last_location_at"),
+                "avatarUrl":   p.get("avatar_url"),
+                "level":       p.get("level", 1),
+                "xpPoints":    p.get("xp_points", 0),
+                "distanceKm":  round(dist, 2),
+                "lastSeenAt":  p.get("last_location_at"),
                 "alreadyFriend": False,
             })
 
     nearby.sort(key=lambda x: x["distanceKm"])
-
     return ok({
-        "users": nearby,
+        "users":       nearby,
         "totalNearby": len(nearby),
-        "radiusKm": radius,
-        "centerLat": lat,
-        "centerLon": lon,
+        "radiusKm":    radius,
+        "centerLat":   lat,
+        "centerLon":   lon,
     })
 
 
@@ -313,9 +323,10 @@ def live_territories(
 
     deg = radiusKm / 111.0
 
+    # Only fetch columns needed for the live-map point layer — skip boundary_geo_json
     terr_res = (
         db.table("territories")
-        .select("*")
+        .select("id,name,center_lat,center_lon,captured_by,area_sq_km,point_value,capture_count,captured_at")
         .eq("status", "ACTIVE")
         .gte("center_lat", lat - deg).lte("center_lat", lat + deg)
         .gte("center_lon", lon - deg).lte("center_lon", lon + deg)

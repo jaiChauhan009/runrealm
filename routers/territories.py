@@ -187,7 +187,12 @@ def _territory_xp(area_sq_km: float, rivals_captured: int) -> int:
     return base + area_bonus + rival_bonus
 
 
-def _award_xp(db: Client, uid: str, amount: int, ref_id: str, desc: str):
+def _award_xp(db: Client, uid: str, amount: int, ref_id: str, desc: str, current_xp: int | None = None):
+    """
+    Insert an XP transaction and update user_profiles.
+    Pass current_xp to skip the profile SELECT (saves one round-trip when the
+    caller already has the profile row in memory).
+    """
     db.table("xp_transactions").insert({
         "user_id":          uid,
         "amount":           amount,
@@ -195,15 +200,16 @@ def _award_xp(db: Client, uid: str, amount: int, ref_id: str, desc: str):
         "reference_id":     ref_id,
         "description":      desc,
     }).execute()
-    profile = (
-        db.table("user_profiles")
-        .select("xp_points")
-        .eq("user_id", uid)
-        .single()
-        .execute()
-        .data or {}
-    )
-    new_xp = (profile.get("xp_points") or 0) + amount
+    if current_xp is None:
+        current_xp = (
+            db.table("user_profiles")
+            .select("xp_points")
+            .eq("user_id", uid)
+            .single()
+            .execute()
+            .data or {}
+        ).get("xp_points", 0)
+    new_xp = current_xp + amount
     db.table("user_profiles").update({
         "xp_points": new_xp,
         "level":     xp.level_from_xp(new_xp),
@@ -389,25 +395,28 @@ def claim_territory(
         }).eq("user_id", rival_uid).execute()
         cache_invalidate(f"dashboard:{rival_uid}")
 
-    # 11. Update claimant profile
+    # 11+12. Read profile once, update all fields + award XP in one write
+    xp_earned  = _territory_xp(area_sq_km, rivals_captured)
     my_profile = (
         db.table("user_profiles")
-        .select("territories_captured, territory_owned_sq_km")
+        .select("territories_captured, territory_owned_sq_km, xp_points")
         .eq("user_id", uid)
         .single()
         .execute()
         .data or {}
     )
+    new_xp = (my_profile.get("xp_points") or 0) + xp_earned
+    db.table("xp_transactions").insert({
+        "user_id": uid, "amount": xp_earned,
+        "transaction_type": "TERRITORY_CAPTURE", "reference_id": territory_id,
+        "description": f"Claimed {area_sq_m:.0f} m² loop territory",
+    }).execute()
     db.table("user_profiles").update({
         "territories_captured":  (my_profile.get("territories_captured") or 0) + 1,
-        "territory_owned_sq_km": round(
-            (my_profile.get("territory_owned_sq_km") or 0) + area_sq_km, 4
-        ),
+        "territory_owned_sq_km": round((my_profile.get("territory_owned_sq_km") or 0) + area_sq_km, 4),
+        "xp_points": new_xp,
+        "level":     xp.level_from_xp(new_xp),
     }).eq("user_id", uid).execute()
-
-    # 12. Award XP
-    xp_earned = _territory_xp(area_sq_km, rivals_captured)
-    _award_xp(db, uid, xp_earned, territory_id, f"Claimed {area_sq_m:.0f} m² loop territory")
 
     # 13. Activity feed
     db.table("activity_feed").insert({
@@ -689,10 +698,13 @@ def corridor_capture(
 
         cache_invalidate(f"dashboard:{rival_uid}")
 
-        # XP for the corridor
+        # XP for the corridor — insert transaction now; profile update batched below
         xp_earned = int(xp.for_territory() * 0.6) + int(claim_area_sq_km * 8)
-        _award_xp(db, uid, xp_earned, new_terr_id,
-                  f"Carved {claim_area_sq_m:.0f} m² corridor through rival territory")
+        db.table("xp_transactions").insert({
+            "user_id": uid, "amount": xp_earned,
+            "transaction_type": "TERRITORY_CAPTURE", "reference_id": new_terr_id,
+            "description": f"Carved {claim_area_sq_m:.0f} m² corridor through rival territory",
+        }).execute()
         total_xp += xp_earned
 
         carved_results.append({
@@ -712,21 +724,22 @@ def corridor_capture(
             "message":           "Route passed through rival territories but overlap was too small to capture.",
         })
 
-    # Update claimant's profile stats
+    # Update claimant's profile stats — single read, single write
     total_carved_sq_km = sum(r["carvedAreaSqM"] for r in carved_results) / 1_000_000
     my_profile = (
         db.table("user_profiles")
-        .select("territories_captured, territory_owned_sq_km")
+        .select("territories_captured, territory_owned_sq_km, xp_points")
         .eq("user_id", uid)
         .single()
         .execute()
         .data or {}
     )
+    new_xp = (my_profile.get("xp_points") or 0) + total_xp
     db.table("user_profiles").update({
         "territories_captured":  (my_profile.get("territories_captured") or 0) + len(carved_results),
-        "territory_owned_sq_km": round(
-            (my_profile.get("territory_owned_sq_km") or 0) + total_carved_sq_km, 4
-        ),
+        "territory_owned_sq_km": round((my_profile.get("territory_owned_sq_km") or 0) + total_carved_sq_km, 4),
+        "xp_points": new_xp,
+        "level":     xp.level_from_xp(new_xp),
     }).eq("user_id", uid).execute()
 
     # Activity feed
