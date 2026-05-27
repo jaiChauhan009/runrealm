@@ -72,19 +72,27 @@ def my_profile(user=Depends(get_current_user), db: Client = Depends(get_db)):
         raise HTTPException(400, "Profile not found")
     p = res.data
     result = ok(_build_profile(p, _resolve_distance(p, uid, db)))
-    cache_set(cache_key, result, ttl_seconds=30)
+    cache_set(cache_key, result, ttl_seconds=60)
     return result
 
 
 @router.get("/{user_id}")
 def public_profile(user_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
+    cache_key = f"profile_pub:{user_id}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        if cached.get("data", {}).get("isPublic") is False and user_id != user.id:
+            raise HTTPException(400, "Profile is private")
+        return cached
     res = db.table("user_profiles").select("*").eq("user_id", user_id).single().execute()
     if not res.data:
         raise HTTPException(400, "Profile not found")
     p = res.data
     if not p.get("is_public", True) and p.get("user_id") != user.id:
         raise HTTPException(400, "Profile is private")
-    return ok(_build_profile(p, _resolve_distance(p, user_id, db)))
+    result = ok(_build_profile(p, _resolve_distance(p, user_id, db)))
+    cache_set(cache_key, result, ttl_seconds=60)
+    return result
 
 
 @router.patch("")
@@ -124,4 +132,5 @@ def update_profile(
         raise HTTPException(400, "Profile not found")
     p = res.data[0]
     cache_invalidate(f"profile:{uid}")
+    cache_invalidate(f"profile_pub:{uid}")
     return ok(_build_profile(p, _resolve_distance(p, uid, db)))

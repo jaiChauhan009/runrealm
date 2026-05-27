@@ -22,7 +22,9 @@ VEHICLE    > 35 km/h  car / motorbike        → segment penalised
                         > 30 % VEHICLE ratio  → claim rejected with a clear message
 TELEPORT   large jump in < 3 s              → heavy penalty (GPS spoof or device glitch)
 """
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -64,6 +66,7 @@ from utils.geo_utils import (
 )
 
 router = APIRouter()
+_pool = ThreadPoolExecutor(max_workers=4)
 
 # ── Validation config ──────────────────────────────────────────────────────────
 
@@ -255,8 +258,9 @@ def _load_overlapping_territories(poly, db: Client) -> list[dict]:
 # ── LOOP CLAIM ────────────────────────────────────────────────────────────────
 
 @router.post("/claim")
-def claim_territory(
+async def claim_territory(
     body: TerritoryClaimRequest,
+    background_tasks: BackgroundTasks,
     user=Depends(get_current_user),
     db: Client = Depends(get_db),
 ):
@@ -265,33 +269,21 @@ def claim_territory(
     valid closed polygon.  Overlapping rival territories are superseded entirely.
     """
     uid = user.id
+    loop = asyncio.get_running_loop()
 
-    # 1. Verify session ownership and completion
-    sess_res = (
-        db.table("run_sessions")
-        .select("id, user_id, status, distance_km")
-        .eq("id", body.sessionId)
-        .eq("user_id", uid)
-        .execute()
+    # Round 1 — session verify + idempotency + route_points in parallel (3 → 1 wall-clock round)
+    sess_res, dup_res, pts_res = await asyncio.gather(
+        loop.run_in_executor(_pool, lambda: get_db().table("run_sessions").select("id, user_id, status, distance_km").eq("id", body.sessionId).eq("user_id", uid).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("territories").select("id").eq("session_id", body.sessionId).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("route_points").select("latitude, longitude, recorded_at, sequence_number").eq("session_id", body.sessionId).order("sequence_number").execute()),
     )
+
     if not sess_res.data:
         raise HTTPException(404, "Session not found")
     if sess_res.data[0].get("status") != "COMPLETED":
         raise HTTPException(400, "Session is not completed yet")
-
-    # 2. Idempotency
-    dup = db.table("territories").select("id").eq("session_id", body.sessionId).execute()
-    if dup.data:
+    if dup_res.data:
         raise HTTPException(400, "Territory already claimed for this session")
-
-    # 3. Load GPS points
-    pts_res = (
-        db.table("route_points")
-        .select("latitude, longitude, recorded_at, sequence_number")
-        .eq("session_id", body.sessionId)
-        .order("sequence_number")
-        .execute()
-    )
     points = pts_res.data or []
 
     if len(points) < MIN_ROUTE_POINTS:
@@ -418,8 +410,8 @@ def claim_territory(
         "level":     xp.level_from_xp(new_xp),
     }).eq("user_id", uid).execute()
 
-    # 13. Activity feed
-    db.table("activity_feed").insert({
+    # 13. Activity feed — non-blocking background task
+    background_tasks.add_task(lambda: db.table("activity_feed").insert({
         "user_id":       uid,
         "activity_type": "TERRITORY_CAPTURED",
         "reference_id":  territory_id,
@@ -431,7 +423,7 @@ def claim_territory(
             "xpEarned":       xp_earned,
         }),
         "is_public": True,
-    }).execute()
+    }).execute())
 
     cache_invalidate(f"dashboard:{uid}")
     cache_invalidate_prefix(f"terr_mine:{uid}")
@@ -464,7 +456,7 @@ def claim_territory(
 # ── CORRIDOR CAPTURE ──────────────────────────────────────────────────────────
 
 @router.post("/corridor")
-def corridor_capture(
+async def corridor_capture(
     body: TerritoryClaimRequest,        # reuse schema — only sessionId needed
     background_tasks: BackgroundTasks,
     user=Depends(get_current_user),
@@ -489,38 +481,21 @@ def corridor_capture(
     • One session can carve through multiple rival territories in one call.
     """
     uid = user.id
+    loop = asyncio.get_running_loop()
 
-    # 1. Verify session
-    sess_res = (
-        db.table("run_sessions")
-        .select("id, user_id, status, distance_km")
-        .eq("id", body.sessionId)
-        .eq("user_id", uid)
-        .execute()
+    # Round 1 — session verify + idempotency + route_points in parallel (3 → 1 wall-clock round)
+    sess_res, dup_res, pts_res = await asyncio.gather(
+        loop.run_in_executor(_pool, lambda: get_db().table("run_sessions").select("id, user_id, status, distance_km").eq("id", body.sessionId).eq("user_id", uid).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("territories").select("id").eq("session_id", body.sessionId).execute()),
+        loop.run_in_executor(_pool, lambda: get_db().table("route_points").select("latitude, longitude, recorded_at, sequence_number").eq("session_id", body.sessionId).order("sequence_number").execute()),
     )
+
     if not sess_res.data:
         raise HTTPException(404, "Session not found")
     if sess_res.data[0].get("status") != "COMPLETED":
         raise HTTPException(400, "Session is not completed yet")
-
-    # 2. Idempotency — one corridor claim per session
-    dup = (
-        db.table("territories")
-        .select("id")
-        .eq("session_id", body.sessionId)
-        .execute()
-    )
-    if dup.data:
+    if dup_res.data:
         raise HTTPException(400, "Corridor already claimed for this session")
-
-    # 3. Load GPS points
-    pts_res = (
-        db.table("route_points")
-        .select("latitude, longitude, recorded_at, sequence_number")
-        .eq("session_id", body.sessionId)
-        .order("sequence_number")
-        .execute()
-    )
     points = pts_res.data or []
 
     if len(points) < 10:
@@ -554,6 +529,14 @@ def corridor_capture(
         })
 
     # 7. Process each rival territory
+    # Batch-read all rival profiles at once — avoids N sequential reads inside the loop
+    rival_uids = [t["captured_by"] for t in rival_territories if t.get("captured_by")]
+    if rival_uids:
+        rp_res = db.table("user_profiles").select("user_id, territory_owned_sq_km").in_("user_id", rival_uids).execute()
+        rival_profiles_map = {p["user_id"]: p for p in (rp_res.data or [])}
+    else:
+        rival_profiles_map = {}
+
     carved_results = []
     total_xp       = 0
 
@@ -661,15 +644,8 @@ def corridor_capture(
                 "capture_count":     (rival_t.get("capture_count") or 0) + 1,
             }).eq("id", rival_id).execute()
 
-            # Adjust rival's owned area
-            rival_profile = (
-                db.table("user_profiles")
-                .select("territory_owned_sq_km")
-                .eq("user_id", rival_uid)
-                .single()
-                .execute()
-                .data or {}
-            )
+            # Use pre-fetched rival profile (no extra round-trip)
+            rival_profile = rival_profiles_map.get(rival_uid, {})
             old_area = rival_profile.get("territory_owned_sq_km") or 0
             db.table("user_profiles").update({
                 "territory_owned_sq_km": round(max(0.0, old_area - claim_area_sq_km), 4),
@@ -682,14 +658,8 @@ def corridor_capture(
                 "capture_count": (rival_t.get("capture_count") or 0) + 1,
             }).eq("id", rival_id).execute()
 
-            rival_profile = (
-                db.table("user_profiles")
-                .select("territory_owned_sq_km")
-                .eq("user_id", rival_uid)
-                .single()
-                .execute()
-                .data or {}
-            )
+            # Use pre-fetched rival profile (no extra round-trip)
+            rival_profile = rival_profiles_map.get(rival_uid, {})
             full_area = rival_t.get("area_sq_km") or 0
             old_area  = rival_profile.get("territory_owned_sq_km") or 0
             db.table("user_profiles").update({

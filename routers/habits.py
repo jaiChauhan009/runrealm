@@ -53,9 +53,9 @@ async def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: C
     uid = user.id
     loop = asyncio.get_running_loop()
 
-    # Fetch habit + streak + existing log in parallel — each lambda calls get_db()
-    # so each pool thread uses its own thread-local httpx client (no HTTP/2 contention).
-    habit_res, streak_res, existing_res = await asyncio.gather(
+    # 4 independent reads in parallel — xp_points read upfront to avoid a sequential
+    # profile SELECT later when awarding XP for habit completion.
+    habit_res, streak_res, existing_res, profile_res = await asyncio.gather(
         loop.run_in_executor(_pool, lambda: get_db().table("habits").select("*").eq("id", body.habitId).eq("user_id", uid).execute()),
         loop.run_in_executor(_pool, lambda: get_db().table("streaks").select("current_streak").eq("user_id", uid).single().execute()),
         loop.run_in_executor(_pool, lambda: (
@@ -64,6 +64,7 @@ async def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: C
             .eq("log_date", body.logDate.isoformat())
             .execute()
         )),
+        loop.run_in_executor(_pool, lambda: get_db().table("user_profiles").select("xp_points").eq("user_id", uid).single().execute()),
     )
 
     if not habit_res.data:
@@ -74,6 +75,7 @@ async def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: C
     is_completed = body.completedValue >= target
     current_streak = (streak_res.data or {}).get("current_streak", 0)
     xp_earned = xp.for_habit(current_streak) if is_completed else 0
+    profile = profile_res.data or {}
 
     row = {
         "habit_id": body.habitId,
@@ -93,7 +95,6 @@ async def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: C
         res = db.table("habit_logs").insert(row).execute()
 
     if is_completed and xp_earned > 0:
-        profile = db.table("user_profiles").select("xp_points").eq("user_id", uid).single().execute().data or {}
         new_xp = (profile.get("xp_points") or 0) + xp_earned
         db.table("user_profiles").update({
             "xp_points": new_xp,
