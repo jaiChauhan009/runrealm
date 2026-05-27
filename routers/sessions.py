@@ -163,6 +163,7 @@ async def end_session(
 
     cache_invalidate(f"dashboard:{uid}")
     cache_invalidate(f"profile:{uid}")
+    cache_invalidate(f"profile_pub:{uid}")
     cache_invalidate(f"sessions:{uid}:p0")
 
     return ok(res.data[0])

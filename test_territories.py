@@ -277,30 +277,31 @@ def test_health():
 
 
 def test_todos(c: Client):
+    today = datetime.now(timezone.utc).date().isoformat()
     # Create todo with scheduled time
     r = c.post("/todos", json={
         "title": "Morning run",
         "category": "FITNESS",
         "scheduledAt": "06:30",
-        "todoDate": "2026-05-27",
+        "todoDate": today,
     })
     todo = check(r, 200, "create todo")
     tid = todo["id"]
     sa = todo.get("scheduled_at") or ""
-    # DB stores a full timestamptz like "2026-05-27T06:30:00+00:00"; verify time is preserved
+    # DB stores a full timestamptz like "2026-05-28T06:30:00+00:00"; verify time is preserved
     assert "06:30" in sa, f"scheduled_at not saved or wrong time: {sa}"
     print(f"  ✅  create todo with scheduled_at → {sa}")
 
     # Create a second todo
-    r2 = c.post("/todos", json={"title": "Hydration check", "category": "HEALTH"})
+    r2 = c.post("/todos", json={"title": "Hydration check", "category": "HEALTH", "todoDate": today})
     t2 = check(r2, 200, "create todo 2")
     tid2 = t2["id"]
 
     # List todos for today
-    r3 = c.get("/todos?todo_date=2026-05-27")
+    r3 = c.get(f"/todos?todo_date={today}")
     todos = check(r3, 200, "list todos")
     assert isinstance(todos, list) and len(todos) >= 2
-    print(f"  ✅  list todos → {len(todos)} for 2026-05-27")
+    print(f"  ✅  list todos → {len(todos)} for {today}")
 
     # Update todo — change scheduled time
     r4 = c.patch(f"/todos/{tid}", json={"scheduledAt": "07:00", "title": "Morning run 7am"})
