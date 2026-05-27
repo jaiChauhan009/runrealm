@@ -43,18 +43,30 @@ def list_todos(
     return ok(res.data or [])
 
 
+def _build_scheduled_at(todo_date_str: str, hhmm: str | None) -> str | None:
+    """Combine a date string (YYYY-MM-DD) and an optional HH:MM into a full ISO-8601 timestamptz."""
+    if not hhmm:
+        return None
+    hhmm = hhmm.strip()
+    if len(hhmm) == 5 and hhmm[2] == ":":
+        return f"{todo_date_str}T{hhmm}:00+00:00"
+    # Already a full ISO string — pass through unchanged
+    return hhmm
+
+
 @router.post("")
 def create_todo(body: TodoCreateRequest, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    todo_date_str = (body.todoDate or date.today()).isoformat()
     row = {
         "user_id": uid,
         "title": body.title,
         "description": body.description,
-        "todo_date": (body.todoDate or date.today()).isoformat(),
+        "todo_date": todo_date_str,
         "category": body.category or "GENERAL",
         "status": "PENDING",
         "is_completed": False,
-        "scheduled_at": body.scheduledAt,
+        "scheduled_at": _build_scheduled_at(todo_date_str, body.scheduledAt),
     }
     res = db.table("daily_todos").insert(row).execute()
     cache_invalidate(f"todo_stats:{uid}")
@@ -124,7 +136,10 @@ def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_
     if body.category is not None:
         update["category"] = body.category
     if body.scheduledAt is not None:
-        update["scheduled_at"] = body.scheduledAt
+        # Fetch the todo's own date so we can build a valid timestamptz
+        date_row = db.table("daily_todos").select("todo_date").eq("id", todo_id).eq("user_id", uid).execute()
+        todo_date_str = (date_row.data[0].get("todo_date") if date_row.data else None) or date.today().isoformat()
+        update["scheduled_at"] = _build_scheduled_at(todo_date_str, body.scheduledAt)
     if not update:
         res = db.table("daily_todos").select("*").eq("id", todo_id).eq("user_id", uid).execute()
         if not res.data:
