@@ -54,7 +54,7 @@ def create_todo(body: TodoCreateRequest, user=Depends(get_current_user), db: Cli
         "category": body.category or "GENERAL",
         "status": "PENDING",
         "is_completed": False,
-        "scheduled_at": body.scheduledAt.isoformat() if body.scheduledAt else None,
+        "scheduled_at": body.scheduledAt,
     }
     res = db.table("daily_todos").insert(row).execute()
     cache_invalidate(f"todo_stats:{uid}")
@@ -123,6 +123,8 @@ def update_todo(todo_id: str, body: TodoUpdateRequest, user=Depends(get_current_
         update["description"] = body.description
     if body.category is not None:
         update["category"] = body.category
+    if body.scheduledAt is not None:
+        update["scheduled_at"] = body.scheduledAt
     if not update:
         res = db.table("daily_todos").select("*").eq("id", todo_id).eq("user_id", uid).execute()
         if not res.data:

@@ -119,13 +119,14 @@ class TodoCreateRequest(BaseModel):
     description: Optional[str] = None
     todoDate: Optional[date] = None
     category: Optional[str] = "GENERAL"
-    scheduledAt: Optional[datetime] = None
+    scheduledAt: Optional[str] = None  # "HH:MM" time string sent by the app
 
 
 class TodoUpdateRequest(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     description: Optional[str] = None
     category: Optional[str] = None
+    scheduledAt: Optional[str] = None  # "HH:MM" — used by "Do Later" to persist new reminder time
 
 
 class TodoStatusRequest(BaseModel):

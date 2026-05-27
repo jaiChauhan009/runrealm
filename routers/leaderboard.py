@@ -69,12 +69,16 @@ def leaderboard(
         raise HTTPException(400, "type must be 'xp' or 'distance'")
 
     top = min(top, 100)
-    cache_key = f"leaderboard:{scope}:{league_id}:{type}:{top}"
+    # GLOBAL and LEAGUE scopes are user-independent; LOCAL/STATE/COUNTRY depend on
+    # the caller's city so the key must include their uid to avoid cross-user cache hits.
+    scope_upper = scope.upper()
+    scope_key = "" if scope_upper in ("GLOBAL", "LEAGUE") else user.id
+    cache_key = f"leaderboard:{scope_upper}:{league_id or ''}:{type}:{top}:{scope_key}"
     cached = cache_get(cache_key)
     if cached:
         return cached
 
-    scope_ids = _resolve_scope(scope, league_id, user.id, db)
+    scope_ids = _resolve_scope(scope_upper, league_id, user.id, db)
 
     if type == "xp":
         query = (

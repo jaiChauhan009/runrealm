@@ -155,6 +155,7 @@ def get_route(session_id: str, user=Depends(get_current_user), db: Client = Depe
         terr_res = (
             db.table("territories")
             .select("id,name,center_lat,center_lon,boundary_geo_json,captured_by,capture_count,area_sq_km,point_value")
+            .eq("status", "ACTIVE")
             .gte("center_lat", min_lat).lte("center_lat", max_lat)
             .gte("center_lon", min_lon).lte("center_lon", max_lon)
             .execute()
@@ -228,6 +229,11 @@ def nearby_users(
     radius = min(radiusKm, 50.0)   # cap at 50 km
     deg = radius / 111.0
 
+    # Only show users whose location was updated in the last 2 hours — stale positions
+    # from days/weeks ago are misleading and not useful for "people near you".
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
     # Bounding-box pre-filter from DB
     res = (
         db.table("user_profiles")
@@ -236,6 +242,7 @@ def nearby_users(
         .gte("last_lon", lon - deg).lte("last_lon", lon + deg)
         .neq("user_id", uid)
         .eq("is_public", True)
+        .gte("last_location_at", cutoff)
         .execute()
     )
     candidates = res.data or []
@@ -309,6 +316,7 @@ def live_territories(
     terr_res = (
         db.table("territories")
         .select("*")
+        .eq("status", "ACTIVE")
         .gte("center_lat", lat - deg).lte("center_lat", lat + deg)
         .gte("center_lon", lon - deg).lte("center_lon", lon + deg)
         .execute()

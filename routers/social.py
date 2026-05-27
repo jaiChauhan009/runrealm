@@ -77,18 +77,31 @@ def activity_feed(
 @router.post("/friends/{friend_id}/request")
 def send_friend_request(friend_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    if uid == friend_id:
+        raise HTTPException(400, "Cannot send a friend request to yourself")
+
     target = db.table("user_profiles").select("id").eq("user_id", friend_id).execute()
     if not target.data:
         raise HTTPException(400, "User not found")
 
+    # Check BOTH directions so we don't create duplicate cross-pending requests
     existing = (
         db.table("user_friends")
-        .select("id")
-        .eq("user_id", uid)
-        .eq("friend_id", friend_id)
+        .select("id, status, user_id, friend_id")
+        .or_(f"and(user_id.eq.{uid},friend_id.eq.{friend_id}),and(user_id.eq.{friend_id},friend_id.eq.{uid})")
         .execute()
     )
     if existing.data:
+        row = existing.data[0]
+        if row["status"] == "ACCEPTED":
+            return ok(None, "Already friends")
+        if row["user_id"] == friend_id:
+            # They already sent us a request — auto-accept instead of duplicating
+            db.table("user_friends").update({
+                "status": "ACCEPTED",
+                "accepted_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", row["id"]).execute()
+            return ok(None, "Friend request accepted")
         return ok(None, "Friend request already sent")
 
     db.table("user_friends").insert({
@@ -118,6 +131,39 @@ def accept_friend_request(friend_id: str, user=Depends(get_current_user), db: Cl
         "accepted_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", req.data[0]["id"]).execute()
     return ok(None, "Friend request accepted")
+
+
+@router.post("/friends/{friend_id}/decline")
+def decline_friend_request(friend_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
+    uid = user.id
+    req = (
+        db.table("user_friends")
+        .select("id")
+        .eq("user_id", friend_id)
+        .eq("friend_id", uid)
+        .eq("status", "PENDING")
+        .execute()
+    )
+    if not req.data:
+        raise HTTPException(400, "No pending request from this user")
+    db.table("user_friends").delete().eq("id", req.data[0]["id"]).execute()
+    return ok(None, "Friend request declined")
+
+
+@router.delete("/friends/{friend_id}")
+def remove_friend(friend_id: str, user=Depends(get_current_user), db: Client = Depends(get_db)):
+    uid = user.id
+    res = (
+        db.table("user_friends")
+        .select("id")
+        .eq("status", "ACCEPTED")
+        .or_(f"and(user_id.eq.{uid},friend_id.eq.{friend_id}),and(user_id.eq.{friend_id},friend_id.eq.{uid})")
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(400, "Not friends")
+    db.table("user_friends").delete().eq("id", res.data[0]["id"]).execute()
+    return ok(None, "Friend removed")
 
 
 @router.get("/friends")

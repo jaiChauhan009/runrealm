@@ -56,7 +56,7 @@ async def dashboard(user=Depends(get_current_user), db: Client = Depends(get_db)
         ),
         loop.run_in_executor(
             _pool,
-            lambda: db.table("territories").select("id", count="exact").eq("captured_by", uid).execute().count or 0,
+            lambda: db.table("territories").select("id", count="exact").eq("captured_by", uid).eq("status", "ACTIVE").execute().count or 0,
         ),
         loop.run_in_executor(
             _pool,
