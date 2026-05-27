@@ -4,7 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
-from cache import cache_invalidate
+from cache import cache_get, cache_invalidate, cache_set
 from database import get_db
 from schemas import EndSessionRequest, RoutePointRequest, StartSessionRequest, ok
 from utils import xp_calculator as xp
@@ -157,6 +157,7 @@ def end_session(
 
     cache_invalidate(f"dashboard:{uid}")
     cache_invalidate(f"profile:{uid}")
+    cache_invalidate(f"sessions:{uid}:p0")
 
     return ok(res.data[0])
 
@@ -202,6 +203,11 @@ def list_sessions(
     db: Client = Depends(get_db),
 ):
     uid = user.id
+    cache_key = f"sessions:{uid}:p{page}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     start = page * size
     end = start + size - 1
 
@@ -221,13 +227,15 @@ def list_sessions(
         .execute()
     )
     total = res.count or 0
-    return ok({
+    result = ok({
         "content": res.data or [],
         "totalElements": total,
         "totalPages": -(-total // size),
         "number": page,
         "size": size,
     })
+    cache_set(cache_key, result, ttl_seconds=30)
+    return result
 
 
 @router.get("/{session_id}")

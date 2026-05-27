@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_get, cache_invalidate, cache_set
 from database import get_db
 from schemas import NotificationTodoActionRequest, ok
 
@@ -18,6 +19,10 @@ def list_notifications(
     db: Client = Depends(get_db),
 ):
     uid = user.id
+    cache_key = f"notifs:{uid}:p{page}:s{size}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
     start = page * size
     res = (
         db.table("notifications")
@@ -28,20 +33,35 @@ def list_notifications(
         .execute()
     )
     total = res.count or 0
-    return ok({"content": res.data or [], "totalElements": total})
+    result = ok({"content": res.data or [], "totalElements": total})
+    cache_set(cache_key, result, ttl_seconds=20)
+    return result
 
 
 @router.get("/unread-count")
 def unread_count(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"notifs_unread:{uid}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
     res = db.table("notifications").select("id", count="exact").eq("user_id", uid).eq("is_read", False).execute()
-    return ok({"unreadCount": res.count or 0})
+    result = ok({"unreadCount": res.count or 0})
+    cache_set(cache_key, result, ttl_seconds=20)
+    return result
+
+
+def _invalidate_notif_cache(uid: str):
+    from cache import cache_invalidate_prefix
+    cache_invalidate_prefix(f"notifs:{uid}:")
+    cache_invalidate(f"notifs_unread:{uid}")
 
 
 @router.post("/read-all")
 def mark_all_read(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
     db.table("notifications").update({"is_read": True}).eq("user_id", uid).eq("is_read", False).execute()
+    _invalidate_notif_cache(uid)
     return ok(None, "All notifications marked read")
 
 
@@ -52,6 +72,7 @@ def mark_one_read(notification_id: str, user=Depends(get_current_user), db: Clie
     if not res.data:
         raise HTTPException(400, "Notification not found")
     db.table("notifications").update({"is_read": True}).eq("id", notification_id).execute()
+    _invalidate_notif_cache(uid)
     return ok(None, "Marked as read")
 
 

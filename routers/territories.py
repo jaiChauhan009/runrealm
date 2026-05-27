@@ -37,7 +37,7 @@ except ImportError:
     _SHAPELY = False
 
 from auth import get_current_user
-from cache import cache_invalidate
+from cache import cache_invalidate, cache_invalidate_prefix
 from database import get_db
 from schemas import TerritoryClaimRequest, ok
 from utils import xp_calculator as xp
@@ -425,6 +425,8 @@ def claim_territory(
     }).execute()
 
     cache_invalidate(f"dashboard:{uid}")
+    cache_invalidate_prefix(f"terr_mine:{uid}")
+    cache_invalidate_prefix("terr_nearby:")
 
     rival_msg = (
         f" Superseded {rivals_captured} rival territor{'ies' if rivals_captured > 1 else 'y'}!"
@@ -743,6 +745,8 @@ def corridor_capture(
     }).execute())
 
     cache_invalidate(f"dashboard:{uid}")
+    cache_invalidate_prefix(f"terr_mine:{uid}")
+    cache_invalidate_prefix("terr_nearby:")
 
     return ok({
         "corridorsCaptured": len(carved_results),
@@ -766,8 +770,16 @@ def nearby_territories(
 ):
     """Active territories near a GPS coordinate, enriched with owner data."""
     radius = min(radiusKm, 50.0)
-    deg    = radius / 111.0
-    res    = (
+    # Round to 2dp (~1 km bucket) so nearby requests share cached data
+    lat_b  = round(lat, 2)
+    lon_b  = round(lon, 2)
+    cache_key = f"terr_nearby:{lat_b}:{lon_b}:{radius}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    deg = radius / 111.0
+    res = (
         db.table("territories")
         .select("*")
         .eq("status", "ACTIVE")
@@ -779,7 +791,9 @@ def nearby_territories(
         t for t in (res.data or [])
         if within_radius(lat, lon, t["center_lat"], t["center_lon"], radius)
     ]
-    return ok(territories)
+    result = ok(territories)
+    cache_set(cache_key, result, ttl_seconds=15)
+    return result
 
 
 @router.get("/mine")
@@ -790,6 +804,11 @@ def my_territories(
     db: Client = Depends(get_db),
 ):
     uid   = user.id
+    cache_key = f"terr_mine:{uid}:p{page}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     start = page * size
     res   = (
         db.table("territories")
@@ -801,10 +820,12 @@ def my_territories(
         .execute()
     )
     total = res.count or 0
-    return ok({
+    result = ok({
         "content":      res.data or [],
         "totalElements": total,
         "totalPages":    -(-total // size),
         "number":        page,
         "size":          size,
     })
+    cache_set(cache_key, result, ttl_seconds=60)
+    return result

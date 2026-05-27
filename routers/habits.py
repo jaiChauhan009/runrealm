@@ -18,8 +18,14 @@ _pool = ThreadPoolExecutor(max_workers=4)
 @router.get("")
 def list_habits(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"habits:{uid}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
     res = db.table("habits").select("*").eq("user_id", uid).eq("is_active", True).execute()
-    return ok(res.data or [])
+    result = ok(res.data or [])
+    cache_set(cache_key, result, ttl_seconds=60)
+    return result
 
 
 @router.post("")
@@ -38,23 +44,34 @@ def create_habit(body: HabitCreateRequest, user=Depends(get_current_user), db: C
         "is_active": True,
     }
     res = db.table("habits").insert(row).execute()
+    cache_invalidate(f"habits:{uid}")
     return ok(res.data[0])
 
 
 @router.post("/log")
-def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: Client = Depends(get_db)):
+async def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    loop = asyncio.get_event_loop()
 
-    habit = db.table("habits").select("*").eq("id", body.habitId).eq("user_id", uid).execute()
-    if not habit.data:
+    # Fetch habit + streak + existing log in parallel (3 independent queries)
+    habit_res, streak_res, existing_res = await asyncio.gather(
+        loop.run_in_executor(_pool, lambda: db.table("habits").select("*").eq("id", body.habitId).eq("user_id", uid).execute()),
+        loop.run_in_executor(_pool, lambda: db.table("streaks").select("current_streak").eq("user_id", uid).single().execute()),
+        loop.run_in_executor(_pool, lambda: (
+            db.table("habit_logs").select("id")
+            .eq("habit_id", body.habitId)
+            .eq("log_date", body.logDate.isoformat())
+            .execute()
+        )),
+    )
+
+    if not habit_res.data:
         raise HTTPException(400, "Habit not found")
 
-    h = habit.data[0]
+    h = habit_res.data[0]
     target = h.get("target_value") or 1.0
     is_completed = body.completedValue >= target
-
-    streak_row = db.table("streaks").select("current_streak").eq("user_id", uid).single().execute().data or {}
-    current_streak = streak_row.get("current_streak", 0)
+    current_streak = (streak_res.data or {}).get("current_streak", 0)
     xp_earned = xp.for_habit(current_streak) if is_completed else 0
 
     row = {
@@ -69,16 +86,8 @@ def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: Client 
         "synced": True,
     }
 
-    # Upsert on (habit_id, log_date)
-    existing = (
-        db.table("habit_logs")
-        .select("id")
-        .eq("habit_id", body.habitId)
-        .eq("log_date", body.logDate.isoformat())
-        .execute()
-    )
-    if existing.data:
-        res = db.table("habit_logs").update(row).eq("id", existing.data[0]["id"]).execute()
+    if existing_res.data:
+        res = db.table("habit_logs").update(row).eq("id", existing_res.data[0]["id"]).execute()
     else:
         res = db.table("habit_logs").insert(row).execute()
 
@@ -90,7 +99,6 @@ def log_habit(body: HabitLogRequest, user=Depends(get_current_user), db: Client 
             "level": xp.level_from_xp(new_xp),
         }).eq("user_id", uid).execute()
 
-    # Invalidate caches so stats and dashboard reflect the new log immediately
     cache_invalidate(f"dashboard:{uid}")
     cache_invalidate(f"habit_stats:{uid}")
 

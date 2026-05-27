@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 
 from auth import get_current_user
+from cache import cache_get, cache_invalidate, cache_set
 from database import get_db
 from schemas import ok
 
@@ -42,6 +43,10 @@ def activity_feed(
     db: Client = Depends(get_db),
 ):
     uid = user.id
+    cache_key = f"feed:{uid}:p{page}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
 
     friends_res = (
         db.table("user_friends")
@@ -66,12 +71,14 @@ def activity_feed(
         .execute()
     )
     total = res.count or 0
-    return ok({
+    result = ok({
         "content": res.data or [],
         "totalElements": total,
         "totalPages": -(-total // size),
         "number": page,
     })
+    cache_set(cache_key, result, ttl_seconds=20)
+    return result
 
 
 @router.post("/friends/{friend_id}/request")
@@ -109,6 +116,7 @@ def send_friend_request(friend_id: str, user=Depends(get_current_user), db: Clie
         "friend_id": friend_id,
         "status": "PENDING",
     }).execute()
+    cache_invalidate(f"friends_sent:{uid}")
     return ok(None, "Friend request sent")
 
 
@@ -130,6 +138,9 @@ def accept_friend_request(friend_id: str, user=Depends(get_current_user), db: Cl
         "status": "ACCEPTED",
         "accepted_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", req.data[0]["id"]).execute()
+    cache_invalidate(f"friends:{uid}")
+    cache_invalidate(f"friends:{friend_id}")
+    cache_invalidate(f"friends_pending:{uid}")
     return ok(None, "Friend request accepted")
 
 
@@ -147,6 +158,7 @@ def decline_friend_request(friend_id: str, user=Depends(get_current_user), db: C
     if not req.data:
         raise HTTPException(400, "No pending request from this user")
     db.table("user_friends").delete().eq("id", req.data[0]["id"]).execute()
+    cache_invalidate(f"friends_pending:{uid}")
     return ok(None, "Friend request declined")
 
 
@@ -163,12 +175,19 @@ def remove_friend(friend_id: str, user=Depends(get_current_user), db: Client = D
     if not res.data:
         raise HTTPException(400, "Not friends")
     db.table("user_friends").delete().eq("id", res.data[0]["id"]).execute()
+    cache_invalidate(f"friends:{uid}")
+    cache_invalidate(f"friends:{friend_id}")
     return ok(None, "Friend removed")
 
 
 @router.get("/friends")
 def list_friends(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"friends:{uid}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     res = (
         db.table("user_friends")
         .select("user_id, friend_id")
@@ -178,16 +197,25 @@ def list_friends(user=Depends(get_current_user), db: Client = Depends(get_db)):
     )
     rows = res.data or []
     if not rows:
-        return ok([])
+        result = ok([])
+        cache_set(cache_key, result, ttl_seconds=60)
+        return result
 
     other_ids = [r["friend_id"] if r["user_id"] == uid else r["user_id"] for r in rows]
     profiles = _profile_map(other_ids, db)
-    return ok([_to_friend_dto(oid, profiles.get(oid, {})) for oid in other_ids])
+    result = ok([_to_friend_dto(oid, profiles.get(oid, {})) for oid in other_ids])
+    cache_set(cache_key, result, ttl_seconds=60)
+    return result
 
 
 @router.get("/friends/pending")
 def pending_requests(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"friends_pending:{uid}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     res = (
         db.table("user_friends")
         .select("user_id")
@@ -197,16 +225,25 @@ def pending_requests(user=Depends(get_current_user), db: Client = Depends(get_db
     )
     rows = res.data or []
     if not rows:
-        return ok([])
+        result = ok([])
+        cache_set(cache_key, result, ttl_seconds=30)
+        return result
 
     requester_ids = [r["user_id"] for r in rows]
     profiles = _profile_map(requester_ids, db)
-    return ok([_to_friend_dto(rid, profiles.get(rid, {})) for rid in requester_ids])
+    result = ok([_to_friend_dto(rid, profiles.get(rid, {})) for rid in requester_ids])
+    cache_set(cache_key, result, ttl_seconds=30)
+    return result
 
 
 @router.get("/friends/sent")
 def sent_requests(user=Depends(get_current_user), db: Client = Depends(get_db)):
     uid = user.id
+    cache_key = f"friends_sent:{uid}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     res = (
         db.table("user_friends")
         .select("friend_id")
@@ -216,8 +253,12 @@ def sent_requests(user=Depends(get_current_user), db: Client = Depends(get_db)):
     )
     rows = res.data or []
     if not rows:
-        return ok([])
+        result = ok([])
+        cache_set(cache_key, result, ttl_seconds=30)
+        return result
 
     target_ids = [r["friend_id"] for r in rows]
     profiles = _profile_map(target_ids, db)
-    return ok([_to_friend_dto(tid, profiles.get(tid, {})) for tid in target_ids])
+    result = ok([_to_friend_dto(tid, profiles.get(tid, {})) for tid in target_ids])
+    cache_set(cache_key, result, ttl_seconds=30)
+    return result

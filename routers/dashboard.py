@@ -114,5 +114,5 @@ async def dashboard(user=Depends(get_current_user), db: Client = Depends(get_db)
         "todayHabits": today_habits,
         "recentActivities": recent_activities,
     })
-    cache_set(cache_key, result, ttl_seconds=30)
+    cache_set(cache_key, result, ttl_seconds=60)
     return result
