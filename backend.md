@@ -1110,3 +1110,28 @@ Every endpoint returns the same envelope:
 4. `migrations/add_todo_status.sql` — `status` column on daily_todos
 5. `migrations/add_todo_scheduled_at.sql` — `scheduled_at` column on daily_todos
 6. `migrations/add_leagues.sql` — leagues, league_members, league_join_requests, league_delete_votes tables + `vote_deadline` column
+
+
+
+
+
+  Now addressing your message about multiple workers. You can run uvicorn with multiple worker processes to handle more concurrent requests. Here's what to know:
+ 
+  For development (current --reload mode): multiple workers + reload don't work together. You're already on 1 worker, which is correct for development.
+
+  For production deployment, replace the current start command with:
+
+  uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+
+  Or better, use Gunicorn as the process manager with uvicorn workers:
+
+  gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+
+  Worker count rule of thumb: (2 × CPU cores) + 1. On a 2-core server → 5 workers. On a 4-core → 9 workers.
+
+  Important: the in-memory cache (cache.py) is per-process. With 4 workers, each has its own cache — a request hitting worker 1 won't see worker 2's cached data. This means slightly
+  more DB hits on a freshly started multi-worker setup, but correctness is not affected. If you want a shared cache across workers, that requires Redis — but for current scale,
+  per-process cache is fine.
+
+  If you're on Render/Railway/Fly.io, set the start command to the gunicorn line above in your deployment config instead of the uvicorn single-worker command.
+
